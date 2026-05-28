@@ -17,11 +17,11 @@
 
 /// Names of the environment variables, mapped to XDGVarType values
 static const char *xdg_env_vars[] = {
-  [kXDGConfigHome] = "XDG_CONFIG_HOME",
-  [kXDGDataHome] = "XDG_DATA_HOME",
-  [kXDGCacheHome] = "XDG_CACHE_HOME",
-  [kXDGStateHome] = "XDG_STATE_HOME",
-  [kXDGRuntimeDir] = "XDG_RUNTIME_DIR",
+  [kXDGConfigHome] = "NVIM_CONFIG_PATH",
+  [kXDGDataHome] = "NVIM_DATA_PATH",
+  [kXDGCacheHome] = "NVIM_CACHE_PATH",
+  [kXDGStateHome] = "NVIM_STATE_PATH",
+  [kXDGRuntimeDir] = "NVIM_RUNTIME_PATH",
   [kXDGConfigDirs] = "XDG_CONFIG_DIRS",
   [kXDGDataDirs] = "XDG_DATA_DIRS",
 };
