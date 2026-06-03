@@ -1,28 +1,29 @@
 local uv = vim.uv
-local log = require('vim.lsp.log')
 local strbuffer = require('vim._core.stringbuffer')
 
 --- Interface for transport implementations.
 ---
---- @class (private, exact) vim.Transport
---- @field listen fun(self: vim.Transport, on_read: fun(err: any, data: string), on_exit: fun(code: integer, signal: integer))
---- @field write fun(self: vim.Transport, msg: string)
---- @field is_closing fun(self: vim.Transport): boolean
---- @field terminate fun(self: vim.Transport)
+--- @class (private, exact) vim.net.Transport
+--- @field listen fun(self: vim.net.Transport, on_read: fun(err: any, data: string), on_exit: fun(code: integer, signal: integer))
+--- @field write fun(self: vim.net.Transport, msg: string)
+--- @field is_closing fun(self: vim.net.Transport): boolean
+--- @field terminate fun(self: vim.net.Transport)
 
 --- Transport backed by newly spawned process using `vim.system()`.
 ---
---- @class (private, exact) vim.TransportRun : vim.Transport
+--- @class (private, exact) vim.net.TransportRun : vim.net.Transport
 --- @field private cmd string[] Command to start the process.
---- @field private extra_spawn_params? vim.transport.ExtraSpawnParams
+--- @field private extra_spawn_params? vim.net.transport.ExtraSpawnParams
+--- @field private log vim.Log
 --- @field private sysobj? vim.SystemObj
---- @field new fun(cmd: string[], extra_spawn_params?: vim.transport.ExtraSpawnParams): vim.TransportRun
+--- @field new fun(cmd: string[], extra_spawn_params?: vim.net.transport.ExtraSpawnParams, log: vim.Log): vim.net.TransportRun
 local TransportRun = {}
 
-function TransportRun.new(cmd, extra_spawn_params)
+function TransportRun.new(cmd, extra_spawn_params, log)
   return setmetatable({
     cmd = cmd,
     extra_spawn_params = extra_spawn_params,
+    log = log,
   }, { __index = TransportRun })
 end
 
@@ -31,7 +32,7 @@ end
 function TransportRun:listen(on_read, on_exit)
   local function on_stderr(_, chunk)
     if chunk then
-      log.error('transport', self.cmd[1], 'stderr', chunk)
+      self.log.error('transport', self.cmd[1], 'stderr', chunk)
     end
   end
 
@@ -90,9 +91,10 @@ end
 
 --- Transport backed by an existing `uv.uv_pipe_t` or `uv.uv_tcp_t` connection.
 ---
---- @class (private, exact) vim.TransportConnect : vim.Transport
+--- @class (private, exact) vim.net.TransportConnect : vim.net.Transport
 --- @field private host_or_path string
 --- @field private port? integer
+--- @field private log vim.Log
 --- @field private handle? uv.uv_pipe_t|uv.uv_tcp_t
 --- Connect returns a PublicClient synchronously so the caller
 --- can immediately send messages before the connection is established.
@@ -101,13 +103,14 @@ end
 --- @field private closing boolean
 --- @field private msgbuf vim.Ringbuf
 --- @field private on_exit? fun(code: integer, signal: integer)
---- @field new fun(host_or_path: string, port?: integer): vim.TransportConnect
+--- @field new fun(host_or_path: string, port?: integer, log: vim.Log): vim.net.TransportConnect
 local TransportConnect = {}
 
-function TransportConnect.new(host_or_path, port)
+function TransportConnect.new(host_or_path, port, log)
   return setmetatable({
     host_or_path = host_or_path,
     port = port,
+    log = log,
     connected = false,
     -- size should be enough because the client can't really do anything until initialization is done
     -- which required a response from the process - implying the connection got established
@@ -157,7 +160,7 @@ function TransportConnect:write(msg)
   if self.connected then
     local _, err = self.handle:write(msg)
     if err and not self.closing then
-      log.error('Error on handle:write: %q', err)
+      self.log.error('Error on handle:write: %q', err)
     end
     return
   end
@@ -190,21 +193,21 @@ end
 --- `nil` means it needs more transport data.
 --- decoder errors are reported through `on_error`.
 ---
----@class (private, exact) vim.MessageStream
+---@class (private, exact) vim.net.MessageStream
 ---@field private strbuf string.buffer
 ---@field private decode fun(strbuf: string.buffer): string?
 ---@field private on_read fun(err: string?, data: string?)
 ---@field private on_error fun(err: any)
----@field feed fun(self: vim.MessageStream, err: string?, data: string?)
+---@field feed fun(self: vim.net.MessageStream, err: string?, data: string?)
 ---@field encode fun(msg: string): string
----@field new fun(decode: (fun(strbuf: string.buffer): string?), encode: (fun(msg: string): string), on_read: fun(err: string?, data: string?), on_error: fun(err: any)): vim.MessageStream
+---@field new fun(decode: (fun(strbuf: string.buffer): string?), encode: (fun(msg: string): string), on_read: fun(err: string?, data: string?), on_error: fun(err: any)): vim.net.MessageStream
 local MessageStream = {}
 
 ---@param decode fun(strbuf: string.buffer): string?
 ---@param encode fun(msg: string): string
 ---@param on_read fun(err: string?, data: string?)
 ---@param on_error fun(err: any)
----@return vim.MessageStream
+---@return vim.net.MessageStream
 function MessageStream.new(decode, encode, on_read, on_error)
   return setmetatable({
     strbuf = strbuffer.new(),

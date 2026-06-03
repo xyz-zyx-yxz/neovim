@@ -40,7 +40,8 @@ M.priorities = {
 ---
 ---@param buf integer Buffer number to apply highlighting to
 ---@param ns integer Namespace to add highlight to
----@param higroup string Highlight group to use for highlighting
+---@param higroup integer|integer[]|string|string[] Highlight group used for the text range.
+--- See the `hl_group` option in |nvim_buf_set_extmark()|.
 ---@param start [integer,integer]|string Start of region as a (line, column) tuple or string accepted by |getpos()|
 ---@param finish [integer,integer]|string End of region as a (line, column) tuple or string accepted by |getpos()|
 ---@param opts? vim.hl.range.Opts
@@ -164,12 +165,12 @@ local events_ns = api.nvim_create_namespace('nvim.hl.events')
 --- ```
 ---
 --- @param opts table|nil Optional parameters
----              - event     (default vim.v.event) Event structure.
----              - higroup   (default "IncSearch") Highlight group for the text region.
----              - on_macro  (default false) Highlight during |macro| execution.
----              - on_visual (default true) Highlight during |Visual| mode.
----              - priority  (default |vim.hl.priorities|`.user`) Integer priority.
----              - timeout   (default 150) Time in ms before highlight is cleared.
+---              - event     (default: vim.v.event) Event structure.
+---              - higroup   (default: "IncSearch") Highlight group for the text region.
+---              - on_macro  (default: false) Highlight during |macro| execution.
+---              - on_visual (default: true) Highlight during |Visual| mode.
+---              - priority  (default: |vim.hl.priorities|`.user`) Integer priority.
+---              - timeout   (default: 150) Time in ms before highlight is cleared.
 function M.hl_op(opts)
   vim.validate('opts', opts, 'table', true)
   opts = opts or {}

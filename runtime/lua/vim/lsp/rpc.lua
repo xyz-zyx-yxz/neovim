@@ -1,6 +1,6 @@
 local log = require('vim.lsp.log')
 local protocol = require('vim.lsp.protocol')
-local vim_transport = require('vim.net._transport')
+local net_transport = require('vim.net._transport')
 local strbuffer = require('vim._core.stringbuffer')
 local validate = vim.validate
 
@@ -235,7 +235,7 @@ end
 function M.create_read_loop(handle_body, on_exit, on_error)
   on_exit = on_exit or function() end
   on_error = on_error or function() end
-  local message_stream = vim_transport.MessageStream.new(
+  local message_stream = net_transport.MessageStream.new(
     message_decoder,
     format_message_with_content_length,
     function(err, chunk)
@@ -262,8 +262,8 @@ end
 --- @field private message_index integer
 --- @field private message_callbacks table<integer, function> dict of message_id to callback
 --- @field private notify_reply_callbacks table<integer, function> dict of message_id to callback
---- @field private transport vim.Transport
---- @field private message_stream vim.MessageStream
+--- @field private transport vim.net.Transport
+--- @field private message_stream vim.net.MessageStream
 --- @field private dispatchers vim.lsp.rpc.Dispatchers
 ---
 --- See [vim.lsp.rpc.request()]
@@ -281,7 +281,7 @@ local Client = {}
 
 ---@package
 ---@param dispatchers vim.lsp.rpc.Dispatchers
----@param transport vim.Transport
+---@param transport vim.net.Transport
 ---@param decode fun(buf: vim._core.stringbuffer): string?
 ---@param format fun(msg: string): string
 ---@return vim.lsp.rpc.Client
@@ -327,7 +327,7 @@ function Client.new(dispatchers, transport, decode, format)
   ---@cast result vim.lsp.rpc.Client
   local self = setmetatable(result, { __index = Client })
 
-  self.message_stream = vim_transport.MessageStream.new(decode, format, function(err, data)
+  self.message_stream = net_transport.MessageStream.new(decode, format, function(err, data)
     if err then
       self:on_error(M.client_errors.READ_ERROR, err)
     elseif data then
@@ -461,9 +461,11 @@ function Client:handle_body(body)
 
   log.debug('rpc.receive', decoded)
 
-  -- Received a request.
-  if type(decoded.method) == 'string' and decoded.id and decoded.id ~= vim.NIL then
-    if type(decoded.id) ~= 'number' and type(decoded.id) ~= 'string' then
+  if
+    -- Received a request.
+    type(decoded.method) == 'string' and decoded.id
+  then
+    if type(decoded.id) ~= 'number' and type(decoded.id) ~= 'string' and decoded.id ~= vim.NIL then
       log.error(
         'Server request id must be a number or string, got ' .. type(decoded.id),
         decoded.method,
@@ -515,17 +517,25 @@ function Client:handle_body(body)
     end))
   elseif
     -- Received a response to a request we sent.
+    decoded.id
+  then
+    -- If there was an error in detecting the id in the Request object
+    -- (e.g. Parse error/Invalid Request), it must be Null.
+    if decoded.id == vim.NIL then
+      log.warn('Server sent response with null id', decoded)
+      self:on_error(M.client_errors.INVALID_SERVER_MESSAGE, decoded)
+      return
+    end
     -- Proceed only if exactly one of 'result' or 'error' is present,
     -- as required by the JSON-RPC spec:
     -- * If 'error' is nil, then 'result' must be present.
     -- * If 'result' is nil, then 'error' must be present (and not vim.NIL).
-    decoded.id
-    and decoded.id ~= vim.NIL
-    and (
-      (decoded.error == nil and decoded.result ~= nil)
-      or (decoded.result == nil and decoded.error ~= nil and decoded.error ~= vim.NIL)
-    )
-  then
+    if (decoded.error == nil or decoded.error == vim.NIL) and decoded.result == nil then
+      log.error('Server respond empty result and error', decoded)
+      self:on_error(M.client_errors.INVALID_SERVER_MESSAGE, decoded)
+      return
+    end
+
     -- We sent a number, so we expect a number.
     local result_id = vim._assert_integer(decoded.id)
 
@@ -569,11 +579,10 @@ function Client:handle_body(body)
       self:on_error(M.client_errors.NO_RESULT_CALLBACK_FOUND, decoded)
       log.error('No callback found for server response id ' .. result_id)
     end
-  elseif decoded.id == vim.NIL then
-    log.warn('Server sent response with null id', decoded.method, decoded.error)
-    self:on_error(M.client_errors.INVALID_SERVER_MESSAGE, decoded)
-  elseif type(decoded.method) == 'string' then
+  elseif
     -- Received a notification.
+    type(decoded.method) == 'string'
+  then
     self:try_call(
       M.client_errors.NOTIFICATION_HANDLER_ERROR,
       self.dispatchers.notification,
@@ -637,13 +646,13 @@ function M.connect(host_or_path, port)
 
     dispatchers = merge_dispatchers(dispatchers)
 
-    local transport = vim_transport.TransportConnect.new(host_or_path, port)
+    local transport = net_transport.TransportConnect.new(host_or_path, port, vim.lsp.log._self)
     return Client.new(dispatchers, transport, message_decoder, format_message_with_content_length)
   end
 end
 
 --- Additional context for the LSP server process.
---- @class vim.transport.ExtraSpawnParams
+--- @class vim.net.transport.ExtraSpawnParams
 --- @inlinedoc
 --- @field cwd? string Working directory for the LSP server process
 --- @field detached? boolean Detach the LSP server process from the current process
@@ -655,7 +664,7 @@ end
 ---
 --- @param cmd string[] Command to start the LSP server.
 --- @param dispatchers? vim.lsp.rpc.Dispatchers
---- @param extra_spawn_params? vim.transport.ExtraSpawnParams
+--- @param extra_spawn_params? vim.net.transport.ExtraSpawnParams
 --- @return vim.lsp.rpc.Client
 function M.start(cmd, dispatchers, extra_spawn_params)
   log.info('Starting RPC client', { cmd = cmd, extra = extra_spawn_params })
@@ -665,7 +674,7 @@ function M.start(cmd, dispatchers, extra_spawn_params)
 
   dispatchers = merge_dispatchers(dispatchers)
 
-  local transport = vim_transport.TransportRun.new(cmd, extra_spawn_params)
+  local transport = net_transport.TransportRun.new(cmd, extra_spawn_params, vim.lsp.log._self)
   return Client.new(dispatchers, transport, message_decoder, format_message_with_content_length)
 end
 
