@@ -17,6 +17,8 @@
 #include "nvim/bufwrite.h"
 #include "nvim/change.h"
 #include "nvim/channel.h"
+#include "nvim/context.h"
+#include "nvim/dialog.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/typval.h"
@@ -459,7 +461,10 @@ int buf_write_all(buf_T *buf, bool forceit)
 /// ":argdo", ":windo", ":bufdo", ":tabdo", ":cdo", ":ldo", ":cfdo" and ":lfdo"
 void ex_listdo(exarg_T *eap)
 {
-  if (curwin->w_p_wfb) {
+  // ":windo" and ":tabdo" only visit existing windows/tabpages, they don't
+  // change the current window's buffer, so they can't escape a 'winfixbuf'
+  // window (which would create a split).
+  if (curwin->w_p_wfb && eap->cmdidx != CMD_windo && eap->cmdidx != CMD_tabdo) {
     if ((eap->cmdidx == CMD_ldo || eap->cmdidx == CMD_lfdo) && !eap->forceit) {
       // Disallow :ldo if 'winfixbuf' is applied
       emsg(_(e_winfixbuf_cannot_go_to_buffer));
@@ -690,7 +695,7 @@ void ex_listdo(exarg_T *eap)
   msg_listdo_overwrite--;
   if (save_ei != NULL) {
     buf_T *bnext;
-    aco_save_T aco = { 0 };
+    CtxSwitch aco = { 0 };
 
     au_event_restore(save_ei);
 
@@ -705,9 +710,9 @@ void ex_listdo(exarg_T *eap)
           apply_autocmds(EVENT_SYNTAX, curbuf->b_p_syn, curbuf->b_fname, true,
                          curbuf);
         } else {
-          aucmd_prepbuf(&aco, buf);
+          ctx_switch(&aco, NULL, NULL, buf, 0);
           apply_autocmds(EVENT_SYNTAX, buf->b_p_syn, buf->b_fname, true, buf);
-          aucmd_restbuf(&aco);
+          ctx_restore(&aco);
         }
 
         // start over, in case autocommands messed things up.

@@ -55,12 +55,12 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/change.h"
 #include "nvim/cursor.h"
+#include "nvim/dialog.h"
 #include "nvim/drawscreen.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/vars.h"
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/fileio.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
@@ -803,7 +803,7 @@ void ml_recover(bool checkext)
     if (n_swaps > 1) {
       // Several swapfiles found: prompt (async) via vim.ui.select().
       typval_T lua_args[] = { items_tv, { .v_type = VAR_UNKNOWN } };
-      nlua_call_vimfn("vim._core.swapfile", "select_swap", lua_args, NULL);
+      nlua_call_typval("vim._core.swapfile", "select_swap", lua_args, NULL);
       tv_clear(&items_tv);
       goto theend;
     }
@@ -1110,6 +1110,18 @@ void ml_recover(bool checkext)
           // It is a data block.
           // Append all the lines in this block.
           bool has_error = false;
+
+          // Verify the cached block's actual size matches the
+          // pointer entry's pe_page_count.  mf_get() cache hits
+          // return the original block without resizing, so a
+          // crafted swap file referencing the same block twice
+          // with different pe_page_count values would cause an
+          // OOB write below.
+          if (hp->bh_page_count != page_count) {
+            error++;
+            ml_append(lnum++, _("??? BLOCK PAGE COUNT MISMATCH"), 0, true);
+            page_count = hp->bh_page_count;
+          }
 
           // Check the length of the block.
           // If wrong, use the length given in the pointer block.
@@ -1425,11 +1437,22 @@ char *make_percent_swname(char *dir, char *dir_end, const char *name)
   FUNC_ATTR_NONNULL_ARG(1, 2)
 {
   String fixed_fname;
-  fixed_fname.data = fix_fname(name != NULL ? name : "");
-  if (fixed_fname.data == NULL) {
+  char *fname = fix_fname(name != NULL ? name : "");
+  if (fname == NULL) {
     return NULL;
   }
 
+  FileInfo file_info;
+  if (!os_fileinfo2(fname, &file_info)) {
+    xfree(fname);
+    return NULL;
+  }
+  fixed_fname.data = fname + file_info.root_off;
+  if (file_info.type == kPathDeviceUNC) {
+    assert(file_info.root_off >= 2);
+    fixed_fname.data -= 2;
+    fixed_fname.data[0] = '/';  // Fixup //?/UNC/server/ path: "C/server/..." -> "//server/..."
+  }
   char *p;
   for (p = fixed_fname.data; *p != NUL; MB_PTR_ADV(p)) {
     if (vim_ispathsep(*p)) {
@@ -1442,7 +1465,7 @@ char *make_percent_swname(char *dir, char *dir_end, const char *name)
   p = &dir_end[-1];
   *p = NUL;
   String d = concat_fnames(cbuf_as_string(dir, (size_t)(p - dir)), fixed_fname, true);
-  xfree(fixed_fname.data);
+  xfree(fname);
 
   return d.data;
 }

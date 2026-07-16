@@ -120,13 +120,13 @@ bool fuzzy_match(char *const str, const char *const pat_arg, const bool matchseq
     int score = FUZZY_SCORE_NONE;
     if (has_match(pat, str)) {
       score_t fzy_score = match_positions(pat, str, matches + numMatches);
-      score = (fzy_score == (score_t)SCORE_MIN
-               ? INT_MIN + 1
-               : (fzy_score == (score_t)SCORE_MAX
-                  ? INT_MAX
-                  : (fzy_score < 0
-                     ? (int)ceil(fzy_score * SCORE_SCALE - 0.5)
-                     : (int)floor(fzy_score * SCORE_SCALE + 0.5))));
+      if (fzy_score != (score_t)SCORE_MIN) {
+        score = (fzy_score == (score_t)SCORE_MAX)
+                ? INT_MAX
+                : ((fzy_score < 0)
+                   ? (int)ceil(fzy_score * SCORE_SCALE - 0.5)
+                   : (int)floor(fzy_score * SCORE_SCALE + 0.5));
+      }
     }
 
     if (score == FUZZY_SCORE_NONE) {
@@ -891,19 +891,28 @@ static score_t match_positions(const char *const needle, const char *const hayst
 
   if (m > MATCH_MAX_LEN || n > m) {
     // Unreasonably large candidate: return no score
-    // If it is a valid match it will still be returned, it will
-    // just be ranked below any reasonably sized candidates
     return (score_t)SCORE_MIN;
   } else if (n == m) {
     // Since this method can only be called with a haystack which
     // matches needle. If the lengths of the strings are equal the
     // strings themselves must also be equal (ignoring case).
-    if (positions) {
-      for (int i = 0; i < n; i++) {
-        positions[i] = (uint32_t)i;
+    // After truncation to MATCH_MAX_LEN n == m can also happen for
+    // unequal strings, so check before taking the shortcut.
+    bool equal = true;
+    for (int i = 0; i < n; i++) {
+      if (match.lower_needle[i] != match.lower_haystack[i]) {
+        equal = false;
+        break;
       }
     }
-    return (score_t)SCORE_MAX;
+    if (equal) {
+      if (positions) {
+        for (int i = 0; i < n; i++) {
+          positions[i] = (uint32_t)i;
+        }
+      }
+      return (score_t)SCORE_MAX;
+    }
   }
 
   // ensure n * MATCH_MAX_LEN * 2 won't overflow

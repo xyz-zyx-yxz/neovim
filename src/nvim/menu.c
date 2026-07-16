@@ -21,11 +21,11 @@
 #include "nvim/ex_docmd.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
-#include "nvim/getchar_defs.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
+#include "nvim/input.h"
+#include "nvim/input_defs.h"
 #include "nvim/keycodes.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mbyte.h"
@@ -1784,7 +1784,7 @@ static char *menutrans_lookup(char *name, int len)
   menutrans_T *tp = (menutrans_T *)menutrans_ga.ga_data;
 
   for (int i = 0; i < menutrans_ga.ga_len; i++) {
-    if (STRNICMP(name, tp[i].from, len) == 0 && tp[i].from[len] == NUL) {
+    if (STRNICMP(name, tp[i].from, (size_t)len) == 0 && tp[i].from[len] == NUL) {
       return tp[i].to;
     }
   }

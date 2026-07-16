@@ -672,7 +672,8 @@ When the popup menu is displayed there are a few more special keys, see
 Note: The keys that are valid in CTRL-X mode are not mapped.  This allows for
 `:map <C-F> <C-X><C-F>` to work.  The key that ends CTRL-X mode (any key that
 is not a valid CTRL-X mode command) is mapped. Also, when doing completion
-with 'complete' mappings apply as usual.
+with 'complete' or when completion was started with |complete()| mappings
+apply as usual.
 
 								*E565*
 Note: While completion is active Insert mode can't be used recursively and
@@ -1252,6 +1253,12 @@ items:
 			popup menu. Only if 'completeopt' has "preselect". If
 			multiple items have "preselect" set, the first one is
 			used.
+	commit_chars	Characters that accept the completion when typed while
+			the item is selected: the match is accepted as with
+			|complete_CTRL-Y|, then the character is inserted as
+			usual.  Takes precedence over extending the leader.
+			Only while the popup menu is displayed.  Control
+			characters (below 0x20) are ignored.
 
 All of these except "icase", "equal", "dup" and "empty" must be a string.  If
 an item does not meet these requirements then an error message is given and

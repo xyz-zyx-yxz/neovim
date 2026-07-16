@@ -28,7 +28,6 @@
 #include "nvim/diff.h"
 #include "nvim/digraph.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/vars.h"
@@ -40,14 +39,17 @@
 #include "nvim/file_search.h"
 #include "nvim/fileio.h"
 #include "nvim/fold.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/help.h"
 #include "nvim/highlight.h"
 #include "nvim/highlight_defs.h"
+#include "nvim/indent_c.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/keycodes.h"
+#include "nvim/lua/executor.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mapping.h"
 #include "nvim/mark.h"
@@ -99,7 +101,6 @@ typedef struct {
   bool need_flushbuf;
   bool set_prevcount;
   bool previous_got_int;             // `got_int` was true
-  bool cmdwin;                       // command-line window normal mode
   bool noexmode;                     // true if the normal mode was pushed from
                                      // ex mode (:global or :visual for example)
   bool toplevel;                     // top-level normal mode
@@ -504,21 +505,19 @@ bool op_pending(void)
 /// Normal state entry point. This is called on:
 ///
 /// - Startup, In this case the function never returns.
-/// - The command-line window is opened (`q:`). Returns when `cmdwin_result` != 0.
 /// - The :visual command is called from :global in ex mode, `:global/PAT/visual`
 ///   for example. Returns when re-entering ex mode (because ex mode recursion is
 ///   not allowed)
 ///
 /// This used to be called main_loop() on main.c
-void normal_enter(bool cmdwin, bool noexmode)
+void normal_enter(bool noexmode)
 {
   NormalState state;
   normal_state_init(&state);
   oparg_T *prev_oap = current_oap;
   current_oap = &state.oa;
-  state.cmdwin = cmdwin;
   state.noexmode = noexmode;
-  state.toplevel = (!cmdwin || cmdwin_result == 0) && !noexmode;
+  state.toplevel = !noexmode;
   state_enter(&state.state);
   current_oap = prev_oap;
 }
@@ -1101,13 +1100,7 @@ static int normal_execute(VimState *state, int key)
     // When "restart_edit" is set fake a "d"elete command, Insert mode will restart automatically.
     // Insert the typed character in the typeahead buffer, so that it can
     // be mapped in Insert mode.  Required for ":lmap" to work.
-    int len = ins_char_typebuf(vgetc_char, vgetc_mod_mask, true);
-
-    // When recording and gotchars() was called the character will be
-    // recorded again, remove the previous recording.
-    if (KeyTyped) {
-      ungetchars(len);
-    }
+    requeue_key(vgetc_char, vgetc_mod_mask, true);
 
     if (restart_edit != 0) {
       s->c = 'd';
@@ -1478,7 +1471,7 @@ static int normal_check(VimState *state)
   // Dict internally somewhere.
   // "may_garbage_collect" is reset in vgetc() which is invoked through
   // do_exmode() and normal_cmd().
-  may_garbage_collect = !s->cmdwin && !s->noexmode;
+  may_garbage_collect = !s->noexmode;
 
   // Update w_curswant if w_set_curswant has been set.
   // Postponed until here to avoid computing w_virtcol too often.
@@ -1490,11 +1483,6 @@ static int normal_check(VimState *state)
     }
     do_exmode();
     return -1;
-  }
-
-  if (s->cmdwin && cmdwin_result != 0) {
-    // command-line window and cmdwin_result is set
-    return 0;
   }
 
   normal_prepare(s);
@@ -1863,7 +1851,6 @@ void may_clear_cmdline(void)
 
 // Routines for displaying a partly typed command
 static char old_showcmd_buf[SHOWCMD_BUFLEN];    // For push_showcmd()
-static bool showcmd_is_clear = true;
 static bool showcmd_visual = false;
 
 void clear_showcmd(void)
@@ -1963,7 +1950,7 @@ bool add_to_showcmd(int c)
     K_RIGHTMOUSE, K_RIGHTDRAG, K_RIGHTRELEASE,
     K_MOUSEDOWN, K_MOUSEUP, K_MOUSELEFT, K_MOUSERIGHT,
     K_X1MOUSE, K_X1DRAG, K_X1RELEASE, K_X2MOUSE, K_X2DRAG, K_X2RELEASE,
-    K_EVENT,
+    K_EVENT, K_COMMAND, K_LUA,
     0
   };
 
@@ -3290,10 +3277,12 @@ static void nv_Zet(cmdarg_T *cap)
     do_cmdline_cmd("q!");
     break;
 
-  // "ZR": restart. With count, restart without checking for changes.
+  // "ZR": restart. With count, does not restore session/check for changes.
   case 'R':
-    if (cap->count0 >= 1) {
-      do_cmdline_cmd("restart +qall!");
+    if (cap->count0 >= 1 && cap->count0 <= 8) {
+      do_cmdline_cmd("restart!");
+    } else if (cap->count0 == 9) {
+      do_cmdline_cmd("restart! +qall!");
     } else {
       do_cmdline_cmd("restart");
     }
@@ -3865,15 +3854,15 @@ static void nv_down(cmdarg_T *cap)
     // <S-Down> is page down
     cap->arg = FORWARD;
     nv_page(cap);
+  } else if (bt_cmdwin(curbuf) && cap->cmdchar == CAR) {
+    // cmdwin: execute the command-line under the cursor.
+    cmdwin_do_action("confirm");
   } else if (bt_quickfix(curbuf) && cap->cmdchar == CAR) {
-    // Quickfix window only: view the result under the cursor.
+    // Quickfix window: view the result under the cursor.
     qf_view_result(false);
   } else {
-    // In the cmdline window a <CR> executes the command.
-    if (cmdwin_type != 0 && cap->cmdchar == CAR) {
-      cmdwin_result = CAR;
-    } else if (bt_prompt(curbuf) && cap->cmdchar == CAR
-               && curwin->w_cursor.lnum == curbuf->b_ml.ml_line_count) {
+    if (bt_prompt(curbuf) && cap->cmdchar == CAR
+        && curwin->w_cursor.lnum == curbuf->b_ml.ml_line_count) {
       // In a prompt buffer a <CR> in the last line invokes the callback.
       prompt_invoke_callback();
       if (restart_edit == 0) {
@@ -4356,6 +4345,23 @@ static void nv_brackets(cmdarg_T *cap)
   }
 }
 
+/// Return true when 'comments' defines a C-style line ("//") or block comment.
+/// This is when "%" should skip matching parens in comments, like the "="
+/// operator does.
+static bool buf_has_cstyle_comments(void)
+{
+  char part_buf[COM_MAX_LEN];  // buffer for one 'comments' part
+
+  for (char *list = curbuf->b_p_com; *list;) {
+    (void)copy_option_part(&list, part_buf, COM_MAX_LEN, ",");
+    char *string = vim_strchr(part_buf, ':');  // flags and comment leader
+    if (string != NULL && string[1] == '/' && (string[2] == '/' || string[2] == '*')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Handle Normal mode "%" command.
 static void nv_percent(cmdarg_T *cap)
 {
@@ -4384,10 +4390,21 @@ static void nv_percent(cmdarg_T *cap)
       beginline(BL_SOL | BL_FIX);
     }
   } else {  // "%" : go to matching paren
+    int flags = 0;
+    // Skip matching parens inside C-style comments, like the "=" operator
+    // does, but not when "%" is in 'cpoptions' (Vi-compatible) or the
+    // cursor sits in a line comment (so a match there can still be found).
+    if (vim_strchr(p_cpo, CPO_MATCH) == NULL && buf_has_cstyle_comments()) {
+      int comment_col = check_linecomment(get_cursor_line_ptr());
+      if (comment_col == MAXCOL || curwin->w_cursor.col < (colnr_T)comment_col) {
+        flags = FM_SKIPCOMM;
+      }
+    }
+
     pos_T *pos;
     cap->oap->motion_type = kMTCharWise;
     cap->oap->use_reg_one = true;
-    if ((pos = findmatch(cap->oap, NUL)) == NULL) {
+    if ((pos = findmatchlimit(cap->oap, NUL, flags, 0)) == NULL) {
       clearopbeep(cap->oap);
     } else {
       setpcmark();
@@ -5021,7 +5038,7 @@ static void nv_visual(cmdarg_T *cap)
     }
     redraw_curbuf_later(UPD_INVERTED);  // update the inversion
   } else {                // start Visual mode
-    if (cap->count0 > 0 && resel_VIsual_mode != NUL) {
+    if (cap->count0 > 0 && resel_VIsual.mode != NUL) {
       // use previously selected part
       VIsual = curwin->w_cursor;
 
@@ -5037,25 +5054,25 @@ static void nv_visual(cmdarg_T *cap)
       }
       // For V and ^V, we multiply the number of lines even if there
       // was only one -- webb
-      if (resel_VIsual_mode != 'v' || resel_VIsual_line_count > 1) {
-        curwin->w_cursor.lnum += resel_VIsual_line_count * cap->count0 - 1;
+      if (resel_VIsual.mode != 'v' || resel_VIsual.line_count > 1) {
+        curwin->w_cursor.lnum += resel_VIsual.line_count * cap->count0 - 1;
         check_cursor(curwin);
       }
-      VIsual_mode = resel_VIsual_mode;
+      VIsual_mode = resel_VIsual.mode;
       if (VIsual_mode == 'v') {
-        if (resel_VIsual_line_count <= 1) {
+        if (resel_VIsual.line_count <= 1) {
           update_curswant_force();
           assert(cap->count0 >= INT_MIN && cap->count0 <= INT_MAX);
-          curwin->w_curswant += resel_VIsual_vcol * cap->count0;
+          curwin->w_curswant += resel_VIsual.vcol * cap->count0;
           if (*p_sel != 'e') {
             curwin->w_curswant--;
           }
         } else {
-          curwin->w_curswant = resel_VIsual_vcol;
+          curwin->w_curswant = resel_VIsual.vcol;
         }
         coladvance(curwin, curwin->w_curswant);
       }
-      if (resel_VIsual_vcol == MAXCOL) {
+      if (resel_VIsual.vcol == MAXCOL) {
         curwin->w_curswant = MAXCOL;
         coladvance(curwin, MAXCOL);
       } else if (VIsual_mode == Ctrl_V) {
@@ -5064,7 +5081,7 @@ static void nv_visual(cmdarg_T *cap)
         curwin->w_cursor.lnum = VIsual.lnum;
         update_curswant_force();
         assert(cap->count0 >= INT_MIN && cap->count0 <= INT_MAX);
-        curwin->w_curswant += resel_VIsual_vcol * cap->count0 - 1;
+        curwin->w_curswant += resel_VIsual.vcol * cap->count0 - 1;
         curwin->w_cursor.lnum = lnum;
         if (*p_sel == 'e') {
           curwin->w_curswant++;
@@ -5768,7 +5785,7 @@ static void nv_dot(cmdarg_T *cap)
   // If "restart_edit" is true, the last but one command is repeated
   // instead of the last command (inserting text). This is used for
   // CTRL-O <.> in insert mode.
-  if (start_redo(cap->count0, restart_edit != 0 && !arrow_used) == false) {
+  if (start_redo(cap->count0, restart_edit != 0 && !Ins.arrow_used) == false) {
     clearopbeep(cap->oap);
   }
 }
@@ -6138,9 +6155,6 @@ static void nv_normal(cmdarg_T *cap)
       clear_cmdline = true;                     // unshow mode later
     }
     restart_edit = 0;
-    if (cmdwin_type != 0) {
-      cmdwin_result = Ctrl_C;
-    }
     if (VIsual_active) {
       end_visual_mode();                // stop Visual
       redraw_curbuf_later(UPD_INVERTED);
@@ -6158,9 +6172,13 @@ static void nv_esc(cmdarg_T *cap)
                     && cap->opcount == 0
                     && cap->count0 == 0
                     && cap->oap->regname == 0);
+  bool cmdwin_cancel = cap->arg && bt_cmdwin(curbuf);
 
-  if (cap->arg) {               // true for CTRL-C
-    if (restart_edit == 0 && cmdwin_type == 0 && !VIsual_active && no_reason) {
+  if (cmdwin_cancel) {
+    got_int = false;  // CTRL-C cancels cmdwin; don't interrupt autocmds etc.
+    cmdwin_do_action("cancel");
+  } else if (cap->arg) {        // true for CTRL-C
+    if (restart_edit == 0 && !VIsual_active && no_reason) {
       if (anyBufIsChanged()) {
         msg(_("Type  :qa!  and press <Enter> to abandon all changes"
               " and exit Nvim"), 0);
@@ -6174,18 +6192,6 @@ static void nv_esc(cmdarg_T *cap)
     }
 
     restart_edit = 0;
-
-    if (cmdwin_type != 0) {
-      cmdwin_result = K_IGNORE;
-      got_int = false;          // don't stop executing autocommands et al.
-      return;
-    }
-  } else if (cmdwin_type != 0 && ex_normal_busy && typebuf_was_empty) {
-    // When :normal runs out of characters while in the command line window
-    // vgetorpeek() will repeatedly return ESC.  Exit the cmdline window to
-    // break the loop.
-    cmdwin_result = K_IGNORE;
-    return;
   }
 
   if (VIsual_active) {
@@ -6193,7 +6199,7 @@ static void nv_esc(cmdarg_T *cap)
     check_cursor_col(curwin);         // make sure cursor is not beyond EOL
     curwin->w_set_curswant = true;
     redraw_curbuf_later(UPD_INVERTED);
-  } else if (no_reason) {
+  } else if (no_reason && !cmdwin_cancel) {
     vim_beep(kOptBoFlagEsc);
   }
   clearop(cap->oap);
@@ -6383,7 +6389,7 @@ static void nv_object(cmdarg_T *cap)
 }
 
 /// "q" command: Start/stop recording.
-/// "q:", "q/", "q?": edit command-line in command-line window.
+/// "q:", "q/", "q?": cmdwin.
 static void nv_record(cmdarg_T *cap)
 {
   if (cap->oap->op_type == OP_FORMAT) {
@@ -6399,12 +6405,16 @@ static void nv_record(cmdarg_T *cap)
   }
 
   if (cap->nchar == ':' || cap->nchar == '/' || cap->nchar == '?') {
-    if (cmdwin_type != 0) {
+    if (cmdwin_buf != NULL) {
       emsg(_(e_cmdline_window_already_open));
       return;
     }
-    stuffcharReadbuff(cap->nchar);
-    stuffcharReadbuff(K_CMDWIN);
+    char fc[2] = { (char)cap->nchar, 0 };
+    typval_T tv_args[] = {
+      { .v_type = VAR_STRING, .vval.v_string = fc },
+      { .v_type = VAR_UNKNOWN },
+    };
+    nlua_call_typval("vim._core.cmdwin", "open", tv_args, NULL);
   } else {
     // (stop) recording into a named register, unless executing a
     // register.

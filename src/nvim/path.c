@@ -139,36 +139,56 @@ char *path_tail_with_sep(char *fname)
   return tail;
 }
 
-/// Finds the path tail (or executable) in an invocation.
+/// Finds the executable name (path tail) in a program invocation.
 ///
-/// @param[in]  invocation A program invocation in the form:
-///                        "path/to/exe [args]".
-/// @param[out] len Stores the length of the executable name.
+/// The invocation starts with an executable path, optionally followed
+/// by arguments.
 ///
-/// @post if `len` is not null, stores the length of the executable name.
+/// Parsing rules:
+/// - A space outside double quotes ends the executable path.
+/// - Within quoted segments, a backslash skips the following character.
+///   Note: on Windows, `\` is treated firstly as a path separator. In
+///   practice, this rule should be rarely needed anyway.
+///
+/// Examples:
+/// - "path/foo/bash --login" => "bash"
+/// - "path/foo bar/bash --login" => "foo"
+/// - "\"path/foo bar/bash\" --login" => "bash"
+/// - "\"path/foo\\\" bar/bash\" --login" => "bash"
+///
+/// @param[in]  invocation Program invocation of the form: "path/to/exe [args]".
+/// @param[out] len Stores the length of the executable name, if not NULL.
 ///
 /// @return The position of the last path separator + 1.
 const char *invocation_path_tail(const char *invocation, size_t *len)
   FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ARG(1)
 {
   const char *tail = get_past_head(invocation);
+  const char *tail_end = tail;
   const char *p = tail;
-  while (*p != NUL && *p != ' ') {
-    bool was_sep = vim_ispathsep_nocolon(*p);
-    MB_PTR_ADV(p);
-    if (was_sep) {
-      tail = p;  // Now tail points one past the separator.
+  bool inquote = false;
+  while (*p != NUL && (inquote || *p != ' ')) {
+    int l = utfc_ptr2len(p);
+    if (vim_ispathsep_nocolon(*p)) {
+      tail = p + 1;  // Now tail points one past the separator.
+    } else if (*p == '\\' && inquote) {
+      p++;
+    } else if (*p == '"') {
+      inquote ^= 1;
+    } else {
+      tail_end = p + l;
     }
+    p += l;
   }
 
   if (len != NULL) {
-    *len = (size_t)(p - tail);
+    *len = (size_t)(tail_end - tail);
   }
 
   return tail;
 }
 
-/// Get the next path component of a path name.
+/// Get the next separator-delimited component of a path name.
 ///
 /// @param fname A file path. (Must be != NULL.)
 /// @return Pointer to first found path separator + 1.
@@ -183,6 +203,20 @@ const char *path_next_component(const char *fname)
     fname++;
   }
   return fname;
+}
+
+/// Advances past consecutive path separators.
+///
+/// @param path   Position in a path.
+/// @param colon  Whether ':' counts as a separator on MS-Windows (see vim_ispathsep()).
+/// @return  Pointer to the first non-separator byte (or terminating NUL).
+char *path_skip_sep(const char *path, bool colon)
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NONNULL_RET FUNC_ATTR_PURE
+{
+  while (colon ? vim_ispathsep(*path) : vim_ispathsep_nocolon(*path)) {
+    path++;
+  }
+  return (char *)path;
 }
 
 /// Returns the length of the path head on the current platform.
@@ -229,9 +263,7 @@ char *get_past_head(const char *path)
   }
 #endif
 
-  while (vim_ispathsep(*retval)) {
-    retval++;
-  }
+  retval = path_skip_sep(retval, true);
 
   return (char *)retval;
 }
@@ -357,7 +389,7 @@ int path_fnamecmp(const char *fname1, const char *fname2)
   const size_t len2 = strlen(fname2);
   return path_fnamencmp(fname1, fname2, MAX(len1, len2));
 #else
-  return mb_strcmp_ic((bool)p_fic, fname1, fname2);
+  return pathcmp(fname1, fname2, -1);
 #endif
 }
 
@@ -687,7 +719,9 @@ static size_t do_path_expand(garray_T *gap, const char *path, size_t wildoff, in
       s = p + 1;
     } else if (path_end >= path + wildoff
 #ifdef MSWIN
-               && vim_strchr("*?[~", (uint8_t)(*path_end)) != NULL
+               // "~" not included here, we want to treat it as literal.
+               // The "~/" case is already handled in `gen_expand_wildcards`.
+               && vim_strchr("*?[", (uint8_t)(*path_end)) != NULL
 #else
                && (vim_strchr("*?[{~$", (uint8_t)(*path_end)) != NULL
                    || (!p_fic && (flags & EW_ICASE) && mb_isalpha(utf_ptr2char(path_end))))
@@ -984,9 +1018,7 @@ static char *get_path_cutoff(char *fname, garray_T *gap)
 
   // skip to the file or directory name
   if (cutoff != NULL) {
-    while (vim_ispathsep(*cutoff)) {
-      MB_PTR_ADV(cutoff);
-    }
+    cutoff = path_skip_sep(cutoff, true);
   }
 
   return cutoff;
@@ -1514,9 +1546,11 @@ void slash_adjust(char *p)
     }
   }
 
+  char from = p_ssl ? '\\' : PATHSEP;
+  char to = p_ssl ? PATHSEP : '\\';
   while (*p) {
-    if (*p == psepcN) {
-      *p = psepc;
+    if (*p == from) {
+      *p = to;
     }
     MB_PTR_ADV(p);
   }
@@ -1532,10 +1566,11 @@ char *path_to_backslash(char *p)
   return p;
 }
 
-/// Convert all backslashes to forward slashes in-place.
+/// Convert all backslashes to forward slashes in-place,
+/// unless when it looks like a URL (e.g. `term://xxxC:\cmd.exe`).
 char *path_to_slash(char *p)
 {
-  if (p != NULL) {
+  if (p != NULL && !path_with_url(p)) {
     strchrsub(p, '\\', PATHSEP);
   }
   return p;
@@ -1620,9 +1655,7 @@ size_t simplify_filename(char *filename)
 
   if (vim_ispathsep(*p)) {
     relative = false;
-    do {
-      p++;
-    } while (vim_ispathsep(*p));
+    p = path_skip_sep(p, true);
   }
   char *start = p;        // remember start after "c:/" or "/" or "///"
   char *p_end = p + strlen(p);  // point to NUL at end of string "p"
@@ -1652,9 +1685,7 @@ size_t simplify_filename(char *filename)
         // of an absolute path name.
         char *tail = p + 1;
         if (p[1] != NUL) {
-          while (vim_ispathsep(*tail)) {
-            MB_PTR_ADV(tail);
-          }
+          tail = path_skip_sep(tail, true);
         } else if (p > start) {
           p--;                          // strip preceding path separator
         }
@@ -1664,10 +1695,7 @@ size_t simplify_filename(char *filename)
     } else if (p[0] == '.' && p[1] == '.'
                && (vim_ispathsep(p[2]) || p[2] == NUL)) {
       // Skip to after ".." or "../" or "..///".
-      char *tail = p + 2;
-      while (vim_ispathsep(*tail)) {
-        MB_PTR_ADV(tail);
-      }
+      char *tail = path_skip_sep(p + 2, true);
 
       if (components > 0) {             // strip one preceding component
         bool do_strip = false;
@@ -2153,10 +2181,8 @@ char *path_shorten_fname(char *full_path, char *dir_name)
     return NULL;
   }
 
-  do {
-    p++;
-  } while (vim_ispathsep_nocolon(*p));
-  return p;
+  // Skip the matched separator, then any following separators (but not a colon).
+  return path_skip_sep(p + 1, false);
 }
 
 /// Invoke expand_wildcards() for one pattern

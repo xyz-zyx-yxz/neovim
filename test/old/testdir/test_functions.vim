@@ -2220,7 +2220,7 @@ func Test_balloon_show()
 endfunc
 
 func Test_setbufvar_options()
-  " This tests that aucmd_prepbuf() and aucmd_restbuf() properly restore the
+  " This tests that ctx_switch() and ctx_restore() properly restore the
   " window layout and cursor position.
   call assert_equal(1, winnr('$'))
   split dummy_preview
@@ -3145,6 +3145,9 @@ func Test_range()
   " get()
   call assert_equal(4, get(range(1, 10), 3))
   call assert_equal(-1, get(range(1, 10), 42, -1))
+  call assert_equal(0, get(range(1, 0, 2), 0))
+  call assert_equal(0, get(range(0, -1, 2), 0))
+  call assert_equal(0, get(range(-2, -1, -2), 0))
 
   " index()
   call assert_equal(1, index(range(1, 5), 2))
@@ -3351,6 +3354,10 @@ func Test_keytrans()
   call assert_equal('<M-x>', "\<*M-x>"->keytrans())
   call assert_equal('<C-I>', "\<*C-I>"->keytrans())
   call assert_equal('<S-3>', "\<*S-3>"->keytrans())
+  call assert_equal('<Bar>', '|'->keytrans())
+  call assert_equal('<M-Bar>', "\<*M-|>"->keytrans())
+  call assert_equal('<Bslash>', '\'->keytrans())
+  call assert_equal('<M-Bslash>', "\<*M-\>"->keytrans())
   call assert_equal('π', 'π'->keytrans())
   call assert_equal('<M-π>', "\<M-π>"->keytrans())
   call assert_equal('ě', 'ě'->keytrans())

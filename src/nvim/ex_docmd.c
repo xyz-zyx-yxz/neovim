@@ -31,13 +31,15 @@
 #include "nvim/clipboard.h"
 #include "nvim/cmdexpand.h"
 #include "nvim/cmdexpand_defs.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
 #include "nvim/debugger.h"
+#include "nvim/dialog.h"
 #include "nvim/digraph.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval/fs.h"
+#include "nvim/eval/funcs.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/typval_defs.h"
 #include "nvim/eval/userfunc.h"
@@ -59,12 +61,12 @@
 #include "nvim/fold.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/highlight_group.h"
 #include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/keycodes.h"
 #include "nvim/lua/executor.h"
 #include "nvim/macros_defs.h"
@@ -1535,11 +1537,11 @@ bool cmd_has_expr_args(cmdidx_T cmdidx)
 ///
 /// @param cmdline Command line string
 /// @param[out] eap Ex command arguments
-/// @param[out] cmdinfo Command parse information
+/// @param[out] cmod Command modifiers
 /// @param[out] errormsg Error message, if any
 ///
 /// @return Success or failure
-bool parse_cmdline(char **cmdline, exarg_T *eap, CmdParseInfo *cmdinfo, const char **errormsg)
+bool parse_cmdline(char **cmdline, exarg_T *eap, cmdmod_T *cmod, const char **errormsg)
 {
   char *after_modifier = NULL;
   bool retval = false;
@@ -1550,8 +1552,8 @@ bool parse_cmdline(char **cmdline, exarg_T *eap, CmdParseInfo *cmdinfo, const ch
   // parsing the command range may set the last search pattern
   save_last_search_pattern();
 
-  // Initialize cmdinfo
-  CLEAR_POINTER(cmdinfo);
+  // Initialize cmod
+  CLEAR_POINTER(cmod);
 
   // Initialize eap
   *eap = (exarg_T){
@@ -1565,7 +1567,7 @@ bool parse_cmdline(char **cmdline, exarg_T *eap, CmdParseInfo *cmdinfo, const ch
 
   char *orig_cmd = eap->cmd;
   // If parse command modifiers failed but modifiers were passed, continue
-  int result = parse_command_modifiers(eap, errormsg, &cmdinfo->cmdmod, false);
+  int result = parse_command_modifiers(eap, errormsg, cmod, false);
   after_modifier = eap->cmd;
   if (result == FAIL && after_modifier == orig_cmd) {
     goto end;
@@ -1684,17 +1686,13 @@ bool parse_cmdline(char **cmdline, exarg_T *eap, CmdParseInfo *cmdinfo, const ch
   }
 
   // Set the "magic" values (characters that get treated specially)
-  if (eap->argt & EX_XFILE) {
-    cmdinfo->magic.file = true;
-  }
-  if (eap->argt & EX_TRLBAR) {
-    cmdinfo->magic.bar = true;
-  }
+  eap->magic.file = eap->argt & EX_XFILE;
+  eap->magic.bar = eap->argt & EX_TRLBAR;
 
   retval = true;
 end:
   if (!retval) {
-    undo_cmdmod(&cmdinfo->cmdmod);
+    undo_cmdmod(cmod);
   }
   ex_pressedreturn = save_ex_pressedreturn;
   curwin->w_cursor = save_cursor;
@@ -1805,9 +1803,9 @@ static int execute_cmd0(int *retv, exarg_T *eap, const char **errormsg, bool pre
 /// Does not do any validation of the Ex command arguments.
 ///
 /// @param eap Ex-command arguments
-/// @param cmdinfo Command parse information
+/// @param cmod Command modifiers
 /// @param preview Execute command preview callback instead of actual command
-int execute_cmd(exarg_T *eap, CmdParseInfo *cmdinfo, bool preview)
+int execute_cmd(exarg_T *eap, cmdmod_T *cmod, bool preview)
 {
   int retv = 0;
   if (do_cmdline_start() == FAIL) {
@@ -1818,7 +1816,7 @@ int execute_cmd(exarg_T *eap, CmdParseInfo *cmdinfo, bool preview)
   const char *errormsg = NULL;
 
   cmdmod_T save_cmdmod = cmdmod;
-  cmdmod = cmdinfo->cmdmod;
+  cmdmod = *cmod;
 
   // Apply command modifiers
   apply_cmdmod(&cmdmod);
@@ -1830,11 +1828,6 @@ int execute_cmd(exarg_T *eap, CmdParseInfo *cmdinfo, bool preview)
     goto end;
   }
   if (!IS_USER_CMDIDX(eap->cmdidx)) {
-    if (cmdwin_type != 0 && !(eap->argt & EX_CMDWIN)) {
-      // Command not allowed in the command line window
-      errormsg = _(e_cmdwin);
-      goto end;
-    }
     if (text_locked() && !(eap->argt & EX_LOCK_OK)) {
       // Command not allowed when text is locked
       errormsg = _(get_text_locked_msg());
@@ -1845,7 +1838,7 @@ int execute_cmd(exarg_T *eap, CmdParseInfo *cmdinfo, bool preview)
   // Do allow ":checktime" (it is postponed).
   // Do allow ":edit" (check for an argument later).
   // Do allow ":file" with no arguments
-  if (!(eap->argt & EX_CMDWIN)
+  if (!(eap->argt & EX_BUFLOCK_OK)
       && eap->cmdidx != CMD_checktime
       && eap->cmdidx != CMD_edit
       && !(eap->cmdidx == CMD_file && *eap->arg == NUL)
@@ -2225,11 +2218,6 @@ static char *do_one_cmd(char **cmdlinep, int flags, cstack_T *cstack, LineGetter
     }
 
     if (!IS_USER_CMDIDX(ea.cmdidx)) {
-      if (cmdwin_type != 0 && !(ea.argt & EX_CMDWIN)) {
-        // Command not allowed in the command line window
-        errormsg = _(e_cmdwin);
-        goto doend;
-      }
       if (text_locked() && !(ea.argt & EX_LOCK_OK)) {
         // Command not allowed when text is locked
         errormsg = _(get_text_locked_msg());
@@ -2241,7 +2229,7 @@ static char *do_one_cmd(char **cmdlinep, int flags, cstack_T *cstack, LineGetter
     // Do allow ":checktime" (it is postponed).
     // Do allow ":edit" (check for an argument later).
     // Do allow ":file" with no arguments (check for an argument later).
-    if (!(ea.argt & EX_CMDWIN)
+    if (!(ea.argt & EX_BUFLOCK_OK)
         && ea.cmdidx != CMD_checktime
         && ea.cmdidx != CMD_edit
         && ea.cmdidx != CMD_file
@@ -4874,10 +4862,6 @@ bool before_quit_autocmds(win_T *wp, bool quit_all, bool forceit)
 /// ":{nr}quit": quit window {nr}
 static void ex_quit(exarg_T *eap)
 {
-  if (cmdwin_type != 0) {
-    cmdwin_result = Ctrl_C;
-    return;
-  }
   // Don't quit while editing the command line.
   if (text_locked()) {
     text_locked_msg();
@@ -4950,13 +4934,6 @@ static void ex_cquit(exarg_T *eap)
 /// Returns FAIL when quitting should be aborted.
 int before_quit_all(exarg_T *eap)
 {
-  if (cmdwin_type != 0) {
-    cmdwin_result = eap->forceit
-                    ? K_XF1  // open_cmdwin() takes care of this
-                    : K_XF2;
-    return FAIL;
-  }
-
   // Don't quit while editing the command line.
   if (text_locked()) {
     text_locked_msg();
@@ -4989,6 +4966,32 @@ static void ex_quitall(exarg_T *eap)
 /// ":restart +cmd <command>": restart the Nvim server using ":cmd" and runs <command> in the new server.
 static void ex_restart(exarg_T *eap)
 {
+  if (!eap->forceit) {
+    dict_T *extra_d = tv_dict_alloc();  // Pass +cmd in the `extra` param of nlua_call_excmd.
+    tv_dict_add_str(extra_d, S_LEN("quit_cmd"), eap->do_ecmd_cmd ? eap->do_ecmd_cmd : "");
+    typval_T extra_tv = { .v_type = VAR_DICT, .vval.v_dict = extra_d };
+    nlua_call_excmd("vim._core.server", "ex_session_restart", eap, &cmdmod, &extra_tv);
+    tv_clear(&extra_tv);
+    return;
+  }
+
+  const char *startreason = "restart!";
+  char *quit_cmd = (eap->do_ecmd_cmd) ? eap->do_ecmd_cmd : "qall";
+  char *after_cmd = eap->arg;
+
+  // XXX: "+:::" is how ex_session_restart() signals that it (recursively) called :restart.
+  if (strequal(quit_cmd, ":::")) {
+    startreason = "restart";
+    if (eap->argc > 1) {
+      eap->args[1][eap->arglens[1]] = NUL;
+      quit_cmd = eap->args[1];
+      after_cmd = eap->argc > 2 ? eap->args[2] : "";
+    } else {
+      emsg("restart failed: +cmd did not quit the server");
+      return;
+    }
+  }
+
   Error err = ERROR_INIT;
   const bool no_ui = !ui_active();
   const char *exepath = get_vim_var_str(VV_PROGPATH);
@@ -5006,6 +5009,16 @@ static void ex_restart(exarg_T *eap)
     if (i > 0 && strequal(arg, "--")) {
       break;
     }
+    // Drop "-S [file]". It conflicts with :restart and usually isn't wanted for :restart!
+    if (i > 0 && strequal(arg, "-S")) {
+      if (li->li_next != NULL) {
+        const char *next_arg = tv_get_string(TV_LIST_ITEM_TV(li->li_next));
+        if (next_arg[0] != '-') {
+          li = li->li_next;
+        }
+      }
+      continue;
+    }
     // Drop "-s <scriptfile>": skip the scriptfile arg too.
     if (i > 0 && strequal(arg, "-s")) {
       li = li->li_next;
@@ -5017,7 +5030,8 @@ static void ex_restart(exarg_T *eap)
       if (next_li != NULL) {
         const char *addr = tv_get_string(TV_LIST_ITEM_TV(next_li));
         if (strstr(addr, ":") || strstr(addr, "/") || strstr(addr, "\\")) {
-          listen_arg = addr;
+          XFREE_CLEAR(listen_arg);
+          listen_arg = TO_SLASH_SAVE(addr);
 #ifdef MSWIN
           // On Windows, don't pass --listen to new server (named pipe can't be reused immediately).
           // Instead pass the address via RPC; new server rebinds after startup.
@@ -5047,14 +5061,12 @@ static void ex_restart(exarg_T *eap)
   // On Windows, --listen is omitted from child argv because the named pipe can't be reused immediately.
   // Recover the canonical address from the Lua module state (set by the previous rebind_after_restart() call),
   // and keep the current listener alive (new server reclaims it).
-  char *listen_arg_alloc = NULL;
   if (listen_arg == NULL) {
     Error lua_err = ERROR_INIT;
     Object rv = NLUA_EXEC_STATIC("return require('vim._core.server').restart_canonical_addr",
                                  (Array)ARRAY_DICT_INIT, kRetObject, NULL, &lua_err);
     if (!ERROR_SET(&lua_err) && rv.type == kObjectTypeString && rv.data.string.size > 0) {
-      listen_arg_alloc = xstrdup(rv.data.string.data);
-      listen_arg = listen_arg_alloc;
+      listen_arg = xstrdup(rv.data.string.data);
     }
     api_free_object(rv);
     api_clear_error(&lua_err);
@@ -5065,11 +5077,10 @@ static void ex_restart(exarg_T *eap)
   bool server_stopped = listen_arg ? server_stop(listen_arg, true) : false;
 #endif
 
+  dict_T *env = create_environment(NULL, false, false, false, NULL);
+  tv_dict_add_str(env, S_LEN(ENV_STARTREASON), startreason);
 #ifdef MSWIN
-  bool restart_alloc_console_env = false;
-  if (os_setenv("__NVIM_RESTART_ALLOC_CONSOLE", "1", 1) == 0) {
-    restart_alloc_console_env = true;
-  }
+  tv_dict_add_str(env, S_LEN(ENV_RESTART_ALLOC_CONSOLE), "1");
 #endif
 
   CallbackReader on_err = CALLBACK_READER_INIT;
@@ -5086,12 +5097,7 @@ static void ex_restart(exarg_T *eap)
   Channel *channel = channel_job_start(argv, exepath,
                                        CALLBACK_READER_INIT, on_err, CALLBACK_NONE,
                                        false, true, true, detach, kChannelStdinPipe,
-                                       NULL, 0, 0, NULL, &exit_status);
-#ifdef MSWIN
-  if (restart_alloc_console_env) {
-    os_unsetenv("__NVIM_RESTART_ALLOC_CONSOLE");
-  }
-#endif
+                                       NULL, 0, 0, env, &exit_status);
   if (!channel) {
     emsg("cannot create a channel job");
     goto fail_1;
@@ -5108,12 +5114,12 @@ static void ex_restart(exarg_T *eap)
   arena_mem_free(result_mem);
   result_mem = NULL;
 
-  if (*eap->arg != NUL) {
+  if (*after_cmd != NUL) {
     // Execute [command] on new server on UIEnter.
     MAXSIZE_TEMP_DICT(autocmd_opts, 3);
     PUT_C(autocmd_opts, "once", BOOLEAN_OBJ(true));
     PUT_C(autocmd_opts, "nested", BOOLEAN_OBJ(true));
-    PUT_C(autocmd_opts, "command", CSTR_AS_OBJ(eap->arg));
+    PUT_C(autocmd_opts, "command", CSTR_AS_OBJ(after_cmd));
     MAXSIZE_TEMP_ARRAY(autocmd_args, 2);
     ADD_C(autocmd_args, CSTR_AS_OBJ("UIEnter"));
     ADD_C(autocmd_args, DICT_OBJ(autocmd_opts));
@@ -5168,7 +5174,6 @@ static void ex_restart(exarg_T *eap)
 
   set_vim_var_string(VV_EXITREASON, S_LEN("restart"));
 
-  char *quit_cmd = (eap->do_ecmd_cmd) ? eap->do_ecmd_cmd : "qall";
   char *quit_cmd_copy = NULL;
 
   // Prepend "confirm " to cmd if :confirm is used
@@ -5216,9 +5221,7 @@ fail_1:
   if (server_stopped && server_start(listen_arg) != 0) {
     semsg("couldn't resume listening on %s", listen_arg);
   }
-#ifdef MSWIN
-  xfree(listen_arg_alloc);
-#endif
+  XFREE_CLEAR(listen_arg);
 }
 
 /// ":close": close current window, unless it is the last one
@@ -5226,9 +5229,7 @@ static void ex_close(exarg_T *eap)
 {
   win_T *win = NULL;
   int winnr = 0;
-  if (cmdwin_type != 0) {
-    cmdwin_result = Ctrl_C;
-  } else if (!text_locked() && !curbuf_locked()) {
+  if (!text_locked() && !curbuf_locked()) {
     if (eap->addr_count == 0) {
       ex_win_close(eap->forceit, curwin, NULL);
     } else {
@@ -5265,7 +5266,7 @@ static void ex_pclose(exarg_T *eap)
 void ex_win_close(int forceit, win_T *win, tabpage_T *tp)
 {
   // Never close the autocommand window.
-  if (is_aucmd_win(win)) {
+  if (is_ctx_win(win)) {
     emsg(_(e_autocmd_close));
     return;
   }
@@ -5303,11 +5304,6 @@ void ex_win_close(int forceit, win_T *win, tabpage_T *tp)
 /// ":tabclose N": close tab page N.
 static void ex_tabclose(exarg_T *eap)
 {
-  if (cmdwin_type != 0) {
-    cmdwin_result = K_IGNORE;
-    return;
-  }
-
   if (first_tabpage->tp_next == NULL) {
     emsg(_("E784: Cannot close last tab page"));
     return;
@@ -5338,11 +5334,6 @@ static void ex_tabclose(exarg_T *eap)
 /// ":tabonly": close all tab pages except the current one
 static void ex_tabonly(exarg_T *eap)
 {
-  if (cmdwin_type != 0) {
-    cmdwin_result = K_IGNORE;
-    return;
-  }
-
   if (first_tabpage->tp_next == NULL) {
     msg(_("Already only one tab page"), 0);
     return;
@@ -5518,10 +5509,6 @@ static void ex_stop(exarg_T *eap)
 /// ":exit", ":xit" and ":wq": Write file and quit the current window.
 static void ex_exit(exarg_T *eap)
 {
-  if (cmdwin_type != 0) {
-    cmdwin_result = Ctrl_C;
-    return;
-  }
   // Don't quit while editing the command line.
   if (text_locked()) {
     text_locked_msg();
@@ -5723,6 +5710,7 @@ static char *findfunc_find_file(char *findarg, size_t findarg_len, int count)
 
   findarg[findarg_len] = cc;
 
+  TO_SLASH(ret_fname);
   return ret_fname;
 }
 
@@ -6084,14 +6072,14 @@ static void ex_resize(exarg_T *eap)
     } else if (n == 0 && eap->arg[0] == NUL) {  // default is very wide
       n = Columns;
     }
-    win_setwidth_win(n, wp);
+    win_setwidth_win(n, wp, true);
   } else {
     if (*eap->arg == '-' || *eap->arg == '+') {
       n += wp->w_height;
     } else if (n == 0 && eap->arg[0] == NUL) {  // default is very high
       n = Rows - 1;
     }
-    win_setheight_win(n, wp);
+    win_setheight_win(n, wp, true);
   }
 }
 
@@ -6187,7 +6175,7 @@ void do_exedit(exarg_T *eap, win_T *old_curwin)
         redraw_all_later(UPD_NOT_VALID);
         pending_exmode_active = true;
 
-        normal_enter(false, true);
+        normal_enter(true);
 
         pending_exmode_active = false;
         RedrawingDisabled = save_rd;
@@ -6521,15 +6509,19 @@ bool changedir_func(char *new_dir, CdScope scope)
     new_dir = NameBuff;
   }
 
+  new_dir = TO_SLASH_SAVE(new_dir);
+
   bool dir_differs = pdir == NULL || pathcmp(pdir, new_dir, -1) != 0;
   if (dir_differs) {
     do_autocmd_dirchanged(new_dir, scope, kCdCauseManual, true);
     if (vim_chdir(new_dir) != 0) {
       emsg(_(e_failed));
+      xfree(new_dir);
       xfree(pdir);
       return false;
     }
   }
+  xfree(new_dir);
 
   char **pp;
   switch (scope) {
@@ -7439,7 +7431,7 @@ static void ex_startinsert(exarg_T *eap)
 static void ex_stopinsert(exarg_T *eap)
 {
   restart_edit = 0;
-  stop_insert_mode = true;
+  Ins.stop_insert_mode = true;
   clearmode();
 }
 
@@ -7743,6 +7735,8 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
   bool tilde_file = false;
   bool skip_mod = false;
   char strbuf[30];
+  // we want 'shellslash' for path expansions like "%", "#", "<afile>", etc.
+  bool use_shellslash = false;
 
   *errormsg = NULL;
   if (escaped != NULL) {
@@ -7795,6 +7789,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
         result = curbuf->b_fname;
         tilde_file = strcmp(result, "~") == 0;
       }
+      use_shellslash = true;
       break;
 
     case SPEC_HASH:             // '#' or "#99": alternate file
@@ -7808,6 +7803,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
         skip_mod = true;
         break;
       }
+      use_shellslash = true;
       char *s = src + 1;
       if (*s == '<') {                  // "#<99" uses v:oldfiles.
         s++;
@@ -7862,6 +7858,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
       break;
 
     case SPEC_AFILE:  // file name for autocommand
+      use_shellslash = !autocmd_fname_full;
       if (autocmd_fname != NULL && !autocmd_fname_full) {
         // Still need to turn the fname into a full path.  It was
         // postponed to avoid a delay when <afile> is not used.
@@ -7897,6 +7894,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
       break;
 
     case SPEC_SFILE:            // file name for ":so" command
+      use_shellslash = true;
       result = estack_sfile(ESTACK_SFILE);
       if (result == NULL) {
         *errormsg = _(e_no_source_file_name_to_substitute_for_sfile);
@@ -7905,6 +7903,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
       resultbuf = result;  // remember allocated string
       break;
     case SPEC_STACK:            // call stack
+      use_shellslash = true;
       result = estack_sfile(ESTACK_STACK);
       if (result == NULL) {
         *errormsg = _(e_no_call_stack_to_substitute_for_stack);
@@ -7913,6 +7912,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
       resultbuf = result;  // remember allocated string
       break;
     case SPEC_SCRIPT:           // script file name
+      use_shellslash = true;
       result = estack_sfile(ESTACK_SCRIPT);
       if (result == NULL) {
         *errormsg = _(e_no_script_file_name_to_substitute_for_script);
@@ -7967,7 +7967,7 @@ char *eval_vars(char *src, const char *srcstart, size_t *usedlen, linenr_T *lnum
       }
     } else if (!skip_mod) {
       valid |= modify_fname(src, tilde_file, usedlen, &result,
-                            &resultbuf, &resultlen);
+                            &resultbuf, &resultlen, use_shellslash);
       if (result == NULL) {
         *errormsg = "";
         return NULL;

@@ -22,7 +22,6 @@
 #include "nvim/cmdexpand_defs.h"
 #include "nvim/cursor.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/executor.h"
@@ -38,13 +37,14 @@
 #include "nvim/fuzzy.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/highlight_group.h"
 #include "nvim/indent.h"
 #include "nvim/indent_c.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/lua/executor.h"
@@ -171,6 +171,7 @@ struct compl_S {
   typval_T cp_user_data;
   char *cp_fname;                ///< file containing the match, allocated when
                                  ///< cp_flags has CP_FREE_FNAME
+  char *cp_commit_chars;         ///< commit characters, allocated. May be NULL.
   int cp_flags;                  ///< CP_ values
   int cp_number;                 ///< sequence number
   bool cp_preselect;             ///< preselect item
@@ -274,6 +275,7 @@ static linenr_T compl_lnum = 0;         ///< lnum where the completion start
 static colnr_T compl_col = 0;           ///< column where the text starts
                                         ///< that is being completed
 static colnr_T compl_ins_end_col = 0;
+static colnr_T compl_longest_end_col = 0;  ///< end of 'longest' inserted text
 static String compl_orig_text = STRING_INIT;  ///< text as it was before
                                               ///< completion started
 /// Undo information to restore extmarks for original text.
@@ -293,6 +295,8 @@ static buf_T *compl_curr_buf = NULL;  ///< buf where completion is active
 // longer fixed timeout is used (COMPL_FUNC_TIMEOUT_MS or
 // COMPL_FUNC_TIMEOUT_NON_KW_MS). - girish
 static bool compl_autocomplete = false;        ///< whether autocompletion is active
+static bool compl_autocomplete_pending = false;
+static uint64_t compl_autocomplete_start_tv;   ///< when the delay was armed
 static uint64_t compl_timeout_ms = COMPL_INITIAL_TIMEOUT_MS;
 static bool compl_time_slice_expired = false;  ///< time budget exceeded for current source
 static bool compl_from_nonkeyword = false;     ///< completion started from non-keyword
@@ -463,7 +467,7 @@ bool ctrl_x_mode_spell(void)
   return ctrl_x_mode == CTRL_X_SPELL;
 }
 
-static bool ctrl_x_mode_eval(void)
+bool ctrl_x_mode_eval(void)
   FUNC_ATTR_PURE
 {
   return ctrl_x_mode == CTRL_X_EVAL;
@@ -696,6 +700,22 @@ bool ins_compl_accept_char(int c)
   return vim_iswordc(c);
 }
 
+/// Check if "c" is a commit character for the currently selected completion
+/// match: typing it accepts the match, then "c" is inserted as usual.
+/// Set with the "commit_chars" item property, see |complete-items|.
+bool ins_compl_commit_char(int c)
+{
+  // Control characters and special keys (negative) are never commit
+  // characters: CR/NL must keep their compl_enter_selects semantics.
+  if (c < ' ') {
+    return false;
+  }
+  return compl_shown_match != NULL
+         && !match_at_original_text(compl_shown_match)
+         && compl_shown_match->cp_commit_chars != NULL
+         && vim_strchr(compl_shown_match->cp_commit_chars, c) != NULL;
+}
+
 /// Get the completed text by inferring the case of the originally typed text.
 /// If the result is in allocated memory "tofree" is set to it.
 static char *ins_compl_infercase_gettext(const char *str, int char_len, int compl_char_len,
@@ -849,7 +869,7 @@ int ins_compl_add_infercase(char *str_arg, int len, bool icase, char *fname, Dir
   }
 
   int res = ins_compl_add(str, len, fname, NULL, false, NULL, dir, flags, false, NULL, score,
-                          false);
+                          false, NULL);
   xfree(tofree);
   return res;
 }
@@ -909,6 +929,9 @@ bool ins_compl_preinsert_longest(void)
 /// @param[in]  flags_arg  match flags (cp_flags)
 /// @param[in]  adup       accept this match even if it is already present.
 /// @param[in]  user_hl    list of extra highlight attributes for abbr kind.
+/// @param[in]  commit_chars  commit characters for this match. May be NULL.
+///                           Must be allocated, ownership is transferred:
+///                           freed here when the match is not added.
 ///
 /// If "cdir" is FORWARD, then the match is added after the current match.
 /// Otherwise, it is added before the current match.
@@ -919,7 +942,7 @@ bool ins_compl_preinsert_longest(void)
 static int ins_compl_add(char *const str, int len, char *const fname, char *const *const cptext,
                          const bool cptext_allocated, typval_T *user_data, const Direction cdir,
                          int flags_arg, const bool adup, const int *user_hl, const int score,
-                         bool preselect)
+                         bool preselect, char *const commit_chars)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   compl_T *match;
@@ -936,6 +959,7 @@ static int ins_compl_add(char *const str, int len, char *const fname, char *cons
     if (cptext_allocated) {
       free_cptext(cptext);
     }
+    xfree(commit_chars);
     return FAIL;
   }
   if (len < 0) {
@@ -955,6 +979,7 @@ static int ins_compl_add(char *const str, int len, char *const fname, char *cons
         if (cptext_allocated) {
           free_cptext(cptext);
         }
+        xfree(commit_chars);
         return NOTDONE;
       }
       match = match->cp_next;
@@ -969,6 +994,7 @@ static int ins_compl_add(char *const str, int len, char *const fname, char *cons
   match = xcalloc(1, sizeof(compl_T));
   match->cp_number = flags & CP_ORIGINAL_TEXT ? 0 : -1;
   match->cp_str = cbuf_to_string(str, (size_t)len);
+  match->cp_commit_chars = commit_chars;
   match->cp_preselect = preselect;
   if (preselect && compl_preselect_match == NULL
       && (get_cot_flags() & kOptCotFlagPreselect)) {
@@ -1085,6 +1111,33 @@ static bool ins_compl_equal(compl_T *match, char *str, size_t len)
     return STRNICMP(match->cp_str.data, str, len) == 0;
   }
   return strncmp(match->cp_str.data, str, len) == 0;
+}
+
+/// Like ins_compl_equal(), but ignore case in the 'longest'-inserted part of
+/// the leader, so CTRL-N and CTRL-P filter the same way.
+static bool ins_compl_equal_sc(compl_T *match, char *str, size_t len)
+  FUNC_ATTR_NONNULL_ALL
+{
+  int typed = compl_length;
+  int longest_end = (compl_get_longest && compl_longest_end_col > compl_col)
+                    ? (int)(compl_longest_end_col - compl_col) : typed;
+
+  if ((match->cp_flags & (CP_EQUAL | CP_ICASE)) || longest_end <= typed) {
+    return ins_compl_equal(match, str, len);
+  }
+
+  if (match->cp_str.size < len) {
+    return false;
+  }
+
+  for (int i = 0; (size_t)i < len; i++) {
+    if (i >= typed && i < longest_end
+        ? TOLOWER_LOC((uint8_t)match->cp_str.data[i]) != TOLOWER_LOC((uint8_t)str[i])
+        : match->cp_str.data[i] != str[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// when len is -1 mean use whole length of p otherwise part of p
@@ -1222,7 +1275,7 @@ static void ins_compl_add_matches(int num_matches, char **matches, int icase)
   for (int i = 0; i < num_matches && add_r != FAIL; i++) {
     add_r = ins_compl_add(matches[i], -1, NULL, NULL, false, NULL, dir,
                           CP_FAST | (icase ? CP_ICASE : 0), false, NULL,
-                          FUZZY_SCORE_NONE, false);
+                          FUZZY_SCORE_NONE, false, NULL);
     if (add_r == OK) {
       // If dir was BACKWARD then honor it just once.
       dir = FORWARD;
@@ -1581,15 +1634,16 @@ static int ins_compl_build_pum(void)
 
     String *leader = get_leader_for_startcol(comp, true);
 
-    // Apply 'smartcase' behavior during normal mode
-    if (ctrl_x_mode_normal() && !p_inf && leader->data
-        && !ignorecase(leader->data) && !cot_fuzzy()) {
+    // Apply 'smartcase': judge case from compl_orig_text, not the leader
+    // which 'longest' may fill with uppercase the user never typed.
+    if (ctrl_x_mode_normal() && !p_inf && compl_orig_text.data
+        && !ignorecase(compl_orig_text.data) && !cot_fuzzy()) {
       comp->cp_flags &= ~CP_ICASE;
     }
 
     if (!match_at_original_text(comp)
         && (leader->data == NULL
-            || ins_compl_equal(comp, leader->data, leader->size)
+            || ins_compl_equal_sc(comp, leader->data, leader->size)
             || (cot_fuzzy() && comp->cp_score != FUZZY_SCORE_NONE))) {
       // Limit number of items from each source if max_items is set.
       bool match_limit_exceeded = false;
@@ -1747,6 +1801,14 @@ void ins_compl_show_pum(void)
   compl_selected_item = cur;
   pum_display(compl_match_array, compl_match_arraysize, cur, array_changed, 0);
   curwin->w_cursor.col = col;
+
+  // The cursor was temporarily moved to "compl_col" above to position the
+  // menu, so the screen update left w_wcol conceal-corrected for that column
+  // rather than for the real cursor.  Redraw the cursor line so the caret is
+  // positioned correctly when the cursor line has concealed text.
+  if (curwin->w_p_cole > 0 && conceal_cursor_line(curwin)) {
+    redrawWinline(curwin, curwin->w_cursor.lnum);
+  }
 
   // After adding leader, set the current match to shown match.
   if (compl_started && compl_curr_match != compl_shown_match) {
@@ -2060,6 +2122,7 @@ static void ins_compl_item_free(compl_T *match)
   }
   free_cptext(match->cp_text);
   tv_clear(&match->cp_user_data);
+  xfree(match->cp_commit_chars);
   xfree(match);
 }
 
@@ -2096,6 +2159,7 @@ void ins_compl_clear(void)
   compl_matches = 0;
   compl_selected_item = -1;
   compl_ins_end_col = 0;
+  compl_longest_end_col = 0;
   compl_curr_win = NULL;
   compl_curr_buf = NULL;
   API_CLEAR_STRING(compl_pattern);
@@ -2298,13 +2362,8 @@ static void ins_compl_new_leader(void)
   ins_compl_insert_bytes(compl_leader.data + get_compl_len(), -1);
   compl_used_match = false;
 
-  if (p_acl > 0) {
-    pum_undisplay(true);
-    redraw_later(curwin, UPD_VALID);
-    update_screen();  // Show char (deletion) immediately
-    ui_flush();
-  }
-
+  int save_w_wrow = curwin->w_wrow;
+  int save_w_leftcol = curwin->w_leftcol;
   if (compl_started) {
     ins_compl_set_original_text(compl_leader.data, compl_leader.size);
     if (is_cpt_func_refresh_always()) {
@@ -2323,7 +2382,7 @@ static void ins_compl_new_leader(void)
     } else {
       compl_autocomplete = false;
     }
-    if (ins_complete(Ctrl_N, true) == FAIL) {
+    if (ins_complete(Ctrl_N, false) == FAIL) {
       compl_cont_status = 0;
     }
     compl_restarting = false;
@@ -2331,8 +2390,12 @@ static void ins_compl_new_leader(void)
 
   compl_enter_selects = !compl_used_match && compl_selected_item != -1;
 
-  // Show the popup menu with a different set of matches.
-  ins_compl_show_pum();
+  // Show the popup menu with a different set of matches.  With
+  // 'autocompletedelay' the menu is already visible here, so update it
+  // immediately rather than re-arming the delay, like a zero delay does.
+  if (!compl_interrupted) {
+    show_pum(save_w_wrow, save_w_leftcol);
+  }
 
   // Don't let Enter select the original text when there is no popup menu.
   if (compl_match_array == NULL) {
@@ -2634,7 +2697,7 @@ static bool ins_compl_stop(const int c, const int prev_mode, bool retval)
     }
 
     // only format when something was inserted
-    if (!arrow_used && !ins_need_undo_get() && c != Ctrl_E) {
+    if (!Ins.arrow_used && !ins_need_undo_get() && c != Ctrl_E) {
       insertchar(NUL, 0, -1);
     }
 
@@ -2645,14 +2708,18 @@ static bool ins_compl_stop(const int c, const int prev_mode, bool retval)
   }
 
   String word = STRING_INIT;
+  const bool is_commit = pum_visible() && ins_compl_commit_char(c);
   // If the popup menu is displayed pressing CTRL-Y means accepting
   // the selection without inserting anything.  When
   // compl_enter_selects is set the Enter key does the same.
-  if ((c == Ctrl_Y || (compl_enter_selects
-                       && (c == CAR || c == K_KENTER || c == NL)))
+  // Note: Unlike Ctrl_Y, a commit-char accepts the match but does not consume the key.
+  if ((c == Ctrl_Y || is_commit || (compl_enter_selects
+                                    && (c == CAR || c == K_KENTER || c == NL)))
       && pum_visible()) {
     word = copy_string(compl_shown_match->cp_str, NULL);
-    retval = true;
+    if (!is_commit) {
+      retval = true;
+    }
     // May need to remove ComplMatchIns highlight.
     redrawWinline(curwin, curwin->w_cursor.lnum);
   }
@@ -2715,7 +2782,7 @@ static bool ins_compl_stop(const int c, const int prev_mode, bool retval)
   compl_num_bests = 0;
   compl_ins_end_col = 0;
 
-  if (c == Ctrl_C && cmdwin_type != 0) {
+  if (c == Ctrl_C && bt_cmdwin(curbuf)) {
     // Avoid the popup menu remains displayed when leaving the
     // command line window.
     update_screen();
@@ -3306,6 +3373,7 @@ static int ins_compl_add_tv(typval_T *const tv, const Direction dir, bool fast)
   char *(cptext[CPT_COUNT]);
   char *user_abbr_hlname = NULL;
   char *user_kind_hlname = NULL;
+  char *commit_chars = NULL;
   int user_hl[2] = { -1, -1 };
   typval_T user_data;
 
@@ -3316,6 +3384,7 @@ static int ins_compl_add_tv(typval_T *const tv, const Direction dir, bool fast)
     cptext[CPT_MENU] = tv_dict_get_string(tv->vval.v_dict, "menu", true);
     cptext[CPT_KIND] = tv_dict_get_string(tv->vval.v_dict, "kind", true);
     cptext[CPT_INFO] = tv_dict_get_string(tv->vval.v_dict, "info", true);
+    commit_chars = tv_dict_get_string(tv->vval.v_dict, "commit_chars", true);
 
     user_abbr_hlname = tv_dict_get_string(tv->vval.v_dict, "abbr_hlgroup", false);
     user_hl[0] = get_user_highlight_attr(user_abbr_hlname);
@@ -3342,10 +3411,12 @@ static int ins_compl_add_tv(typval_T *const tv, const Direction dir, bool fast)
   if (word == NULL || (!empty && *word == NUL)) {
     free_cptext(cptext);
     tv_clear(&user_data);
+    xfree(commit_chars);
     return FAIL;
   }
   int status = ins_compl_add((char *)word, -1, NULL, cptext, true,
-                             &user_data, dir, flags, dup, user_hl, FUZZY_SCORE_NONE, preselect);
+                             &user_data, dir, flags, dup, user_hl, FUZZY_SCORE_NONE, preselect,
+                             commit_chars);
   if (status != OK) {
     tv_clear(&user_data);
   }
@@ -3418,7 +3489,7 @@ static void set_completion(colnr_T startcol, list_T *list)
   bool compl_no_select = (cur_cot_flags & kOptCotFlagNoselect) != 0;
 
   // If already doing completions stop it.
-  if (ctrl_x_mode_not_default()) {
+  if (compl_started || ctrl_x_mode_not_default()) {
     ins_compl_prep(' ');
   }
   ins_compl_clear();
@@ -3441,7 +3512,7 @@ static void set_completion(colnr_T startcol, list_T *list)
   }
   if (ins_compl_add(compl_orig_text.data, (int)compl_orig_text.size,
                     NULL, NULL, false, NULL, 0,
-                    flags | CP_FAST, false, NULL, FUZZY_SCORE_NONE, false) != OK) {
+                    flags | CP_FAST, false, NULL, FUZZY_SCORE_NONE, false, NULL) != OK) {
     return;
   }
 
@@ -3956,6 +4027,7 @@ static void ins_compl_longest_insert(char *prefix)
 {
   ins_compl_delete(false);
   ins_compl_insert_bytes(prefix + get_compl_len(), -1);
+  compl_longest_end_col = curwin->w_cursor.col;
   ins_redraw(false);
 }
 
@@ -4115,7 +4187,7 @@ static void get_next_filename_completion(void)
         int current_score = compl_fuzzy_scores[fuzzy_indices_data[i]];
         if (ins_compl_add(match, -1, NULL, NULL, false, NULL, dir,
                           CP_FAST | ((p_fic || p_wic) ? CP_ICASE : 0),
-                          false, NULL, current_score, false) == OK) {
+                          false, NULL, current_score, false, NULL) == OK) {
           dir = FORWARD;
         }
 
@@ -4174,7 +4246,7 @@ static void get_next_cmdline_completion(void)
       }
 
       add_r = ins_compl_add(matches[i], -1, NULL, cptext, false, NULL, dir,
-                            CP_FAST, false, NULL, FUZZY_SCORE_NONE, false);
+                            CP_FAST, false, NULL, FUZZY_SCORE_NONE, false, NULL);
       if (add_r == OK) {
         // if dir was BACKWARD then honor it just once
         dir = FORWARD;
@@ -4606,7 +4678,7 @@ static void get_next_bufname_token(void)
       char *tail = path_tail(b->b_sfname);
       if (strncmp(tail, compl_orig_text.data, compl_orig_text.size) == 0) {
         ins_compl_add(tail, (int)strlen(tail), NULL, NULL, false, NULL, 0,
-                      p_ic ? CP_ICASE : 0, false, NULL, FUZZY_SCORE_NONE, false);
+                      p_ic ? CP_ICASE : 0, false, NULL, FUZZY_SCORE_NONE, false, NULL);
       }
     }
   }
@@ -5058,13 +5130,14 @@ static char *find_common_prefix(size_t *prefix_len, bool curbuf_only)
     String *leader = get_leader_for_startcol(compl, true);
 
     // Apply 'smartcase' behavior during normal mode
-    if (ctrl_x_mode_normal() && !p_inf && leader->data && !ignorecase(leader->data)) {
+    if (ctrl_x_mode_normal() && !p_inf && compl_orig_text.data
+        && !ignorecase(compl_orig_text.data)) {
       compl->cp_flags &= ~CP_ICASE;
     }
 
     if (!match_at_original_text(compl)
         && (leader->data == NULL
-            || ins_compl_equal(compl, leader->data, leader->size))) {
+            || ins_compl_equal_sc(compl, leader->data, leader->size))) {
       // Limit number of items from each source if max_items is set.
       bool match_limit_exceeded = false;
       int cur_source = compl->cp_cpt_source_idx;
@@ -5200,7 +5273,13 @@ void ins_compl_insert(bool move_cursor, bool insert_prefix)
 static void ins_compl_show_filename(void)
 {
   char *const lead = _("match in file");
-  int space = sc_col - vim_strsize(lead) - 2;
+
+  // In the case of ext_messages, `sc_col` is obsolete. Fortunately, long messages are no longer
+  // disruptive, so truncation could be skipped. But in this particular case, with default
+  // configuration `showmode cmdheight=1`, a multi-line message is shown partially, and a message
+  // that fits into one line is not shown at all. It's better to be consistent: it should not depend
+  // on the exact length of the message whether it is displayed at all.
+  int space = (ui_has(kUIMessages) ? Columns : sc_col) - vim_strsize(lead) - 2;
   if (space <= 0) {
     return;
   }
@@ -5374,7 +5453,6 @@ static int ins_compl_next(bool allow_get_expansion, int count, bool insert_match
   bool compl_no_insert = (cur_cot_flags & kOptCotFlagNoinsert) != 0
                          || (compl_autocomplete && !ins_compl_has_preinsert());
   bool compl_preinsert = ins_compl_has_preinsert();
-  bool has_autocomplete_delay = (compl_autocomplete && p_acl > 0);
 
   // When user complete function return -1 for findstart which is next
   // time of 'always', compl_shown_match become NULL.
@@ -5421,9 +5499,6 @@ static int ins_compl_next(bool allow_get_expansion, int count, bool insert_match
   // Insert the text of the new completion, or the compl_leader.
   if (!started && ins_compl_preinsert_longest()) {
     ins_compl_insert(true, true);
-    if (has_autocomplete_delay) {
-      update_screen();  // Show the inserted text right away
-    }
   } else if (compl_no_insert && !started && !compl_preinsert) {
     ins_compl_insert_bytes(compl_orig_text.data + get_compl_len(), -1);
     compl_used_match = false;
@@ -5448,10 +5523,8 @@ static int ins_compl_next(bool allow_get_expansion, int count, bool insert_match
     // redraw to show the user what was inserted
     update_screen();  // TODO(bfredl): no!
 
-    if (!has_autocomplete_delay) {
-      // display the updated popup menu
-      ins_compl_show_pum();
-    }
+    // display the updated popup menu
+    ins_compl_show_pum();
 
     // Delete old text to be replaced, since we're still searching and
     // don't want to match ourselves!
@@ -5525,9 +5598,9 @@ void ins_compl_check_keys(int frequency, bool in_compl_func)
       // back with vungetc() below.  But skip K_IGNORE.
       c = safe_vgetc();
       if (c != K_IGNORE) {
-        // Don't interrupt completion when the character wasn't typed,
-        // e.g., when doing @q to replay keys.
-        if (c != Ctrl_R && KeyTyped) {
+        // Typed keys that get mapped lose KeyTyped. Still let
+        // complete_check() interrupt, except during @r replay.
+        if (c != Ctrl_R && (KeyTyped || (in_compl_func && reg_executing == 0))) {
           compl_interrupted = true;
         }
 
@@ -6029,16 +6102,16 @@ static void ins_compl_continue_search(char *line)
 /// start insert mode completion
 static int ins_compl_start(void)
 {
-  const bool save_did_ai = did_ai;
+  const bool save_did_ai = Ins.did_ai;
 
   // First time we hit ^N or ^P (in a row, I mean)
 
-  did_ai = false;
-  did_si = false;
-  can_si = false;
-  can_si_back = false;
+  Ins.did_ai = false;
+  Ins.did_si = false;
+  Ins.can_si = false;
+  Ins.can_si_back = false;
   if (stop_arrow() == FAIL) {
-    did_ai = save_did_ai;
+    Ins.did_ai = save_did_ai;
     return FAIL;
   }
 
@@ -6074,8 +6147,8 @@ static int ins_compl_start(void)
   if (compl_get_info(line, startcol, curs_col, &line_invalid) == FAIL) {
     if (ctrl_x_mode_function() || ctrl_x_mode_omni()
         || thesaurus_func_complete(ctrl_x_mode)) {
-      // restore did_ai, so that adding comment leader works
-      did_ai = save_did_ai;
+      // restore Ins.did_ai, so that adding comment leader works
+      Ins.did_ai = save_did_ai;
     }
     return FAIL;
   }
@@ -6129,11 +6202,11 @@ static int ins_compl_start(void)
   }
   if (ins_compl_add(compl_orig_text.data, (int)compl_orig_text.size,
                     NULL, NULL, false, NULL, 0,
-                    flags, false, NULL, FUZZY_SCORE_NONE, false) != OK) {
+                    flags, false, NULL, FUZZY_SCORE_NONE, false, NULL) != OK) {
     API_CLEAR_STRING(compl_pattern);
     API_CLEAR_STRING(compl_orig_text);
     kv_destroy(compl_orig_extmarks);
-    did_ai = save_did_ai;
+    Ins.did_ai = save_did_ai;
     return FAIL;
   }
 
@@ -6148,7 +6221,7 @@ static int ins_compl_start(void)
     ui_flush();
   }
 
-  did_ai = save_did_ai;
+  Ins.did_ai = save_did_ai;
   return OK;
 }
 
@@ -6225,10 +6298,6 @@ static void ins_compl_show_statusmsg(void)
 /// Returns OK if completion was done, FAIL if something failed.
 int ins_complete(int c, bool enable_pum)
 {
-  const bool disable_ac_delay = compl_started && ctrl_x_mode_normal()
-                                && (c == Ctrl_N || c == Ctrl_P || c == Ctrl_R
-                                    || ins_compl_pum_key(c));
-
   compl_direction = ins_compl_key2dir(c);
   int insert_match = ins_compl_use_match(c);
 
@@ -6240,10 +6309,6 @@ int ins_complete(int c, bool enable_pum)
     return FAIL;
   }
 
-  uint64_t compl_start_tv = 0;  ///< Time when match collection starts
-  if (compl_autocomplete && p_acl > 0 && !disable_ac_delay) {
-    compl_start_tv = os_hrtime();
-  }
   compl_curr_win = curwin;
   compl_curr_buf = curwin->w_buffer;
   compl_shown_match = compl_curr_match;
@@ -6299,26 +6364,6 @@ int ins_complete(int c, bool enable_pum)
     ins_compl_show_statusmsg();
   }
 
-  // Wait for the autocompletion delay to expire
-  if (compl_autocomplete && p_acl > 0 && !disable_ac_delay && !no_matches_found
-      && (os_hrtime() - compl_start_tv) / 1000000 < (uint64_t)p_acl) {
-    setcursor();
-    ui_flush();
-    do {
-      if (char_avail()) {
-        if (ins_compl_preinsert_effect() && ins_compl_win_active(curwin)) {
-          ins_compl_delete(false);  // Remove pre-inserted text
-          compl_ins_end_col = compl_col;
-        }
-        ins_compl_restart();
-        compl_interrupted = true;
-        break;
-      } else {
-        os_delay(2L, true);
-      }
-    } while ((os_hrtime() - compl_start_tv) / 1000000 < (uint64_t)p_acl);
-  }
-
   // Show the popup menu, unless we got interrupted.
   if (enable_pum && !compl_interrupted) {
     show_pum(save_w_wrow, save_w_leftcol);
@@ -6334,6 +6379,36 @@ void ins_compl_enable_autocomplete(void)
 {
   compl_autocomplete = true;
   compl_get_longest = false;
+}
+
+/// Arm the 'autocompletedelay' timer when the delay is in effect.
+/// Return true when the popup should be deferred, false to trigger it now.
+bool ins_compl_arm_autocomplete_delay(void)
+{
+  if (p_acl > 0) {
+    compl_autocomplete_start_tv = os_hrtime();
+    compl_autocomplete_pending = true;
+    return true;
+  }
+  return false;
+}
+
+/// Clear the pending 'autocompletedelay' state.
+void ins_compl_clear_autocomplete_delay(void)
+{
+  compl_autocomplete_pending = false;
+}
+
+/// Return true while waiting for 'autocompletedelay' to expire.
+bool ins_compl_autocomplete_pending(void)
+{
+  return compl_autocomplete_pending;
+}
+
+/// Return the time in msec since the 'autocompletedelay' was armed.
+int64_t ins_compl_autocomplete_elapsed(void)
+{
+  return (int64_t)((os_hrtime() - compl_autocomplete_start_tv) / 1000000);
 }
 
 /// Remove (if needed) and show the popup menu

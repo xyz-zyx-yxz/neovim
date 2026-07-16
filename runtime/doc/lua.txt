@@ -961,6 +961,12 @@ Vim options can be accessed through |vim.o|, which behaves like Vimscript
     To set a string value:
         Vimscript: `set wildignore=*.o,*.a,__pycache__`
         Lua:       `vim.o.wildignore = '*.o,*.a,__pycache__'`
+        Lua (alt): `vim.o.wildignore = { '*.o', '*.a', '__pycache__' }`
+
+    To set a key:value type option:
+        Vimscript: `set listchars=eol:~,space:-`
+        Lua:       `vim.o.listchars = 'eol:~,space:-'`
+        Lua (alt): `vim.o.listchars = { eol = '~', space = '-' }`
 
 Similarly, there is |vim.bo| and |vim.wo| for setting buffer-scoped and
 window-scoped options. Note that this must NOT be confused with
@@ -1568,6 +1574,8 @@ vim.show_pos({buf}, {row}, {col}, {filter})                   *vim.show_pos()*
     Show all the items at a given buffer position.
 
     Can also be shown with `:Inspect`.                              *:Inspect*
+
+    See also |:marks| to list all extmarks.
 
     Example: To bind this function to the vim-scriptease inspired `zS` in
     Normal mode: >lua
@@ -2261,7 +2269,6 @@ vim.validate({name}, {value}, {validator}, {optional}, {message})
           -- ...
         end
 <
-
     2. `vim.validate(spec)` (DEPRECATED) where `spec` is of type
        `table<string,[value:any, validator: vim.validate.Validator, optional_or_msg? : boolean|string]>)`
        Validates a argument specification. Specs are evaluated in alphanumeric
@@ -2469,9 +2476,7 @@ vim.filetype.match({args})                              *vim.filetype.match()*
 
     The filetype can be detected using one of three methods:
     1. Using an existing buffer
-
     2. Using only a file name
-
     3. Using only file contents
 
     Of these, option 1 provides the most accurate result as it uses both the
@@ -2593,6 +2598,14 @@ vim.fs.dir({path}, {opts})                                      *vim.fs.dir()*
     Gets an iterator over items found in `path` (normalized via
     |vim.fs.normalize()|).
 
+    Example: >lua
+        for name, type, err in vim.fs.dir(path, { err = true }) do
+          if err then
+            -- Failed to scan directory {name} (may be the root {path} itself).
+          end
+        end
+<
+
     Attributes: ~
         Since: 0.8.0
 
@@ -2601,6 +2614,9 @@ vim.fs.dir({path}, {opts})                                      *vim.fs.dir()*
                 |vim.fs.normalize()|.
       • {opts}  (`table?`) Optional keyword arguments:
                 • {depth}? (`integer`, default: `1`) How deep to traverse.
+                • {err}? (`boolean`, default: `false`) Report errors via the
+                  iterator's third value ("err"), instead of silently
+                  skipping.
                 • {follow}? (`boolean`, default: `false`) Follow symbolic
                   links.
                 • {skip}? (`fun(dir_name: string): boolean`) Predicate to
@@ -2609,10 +2625,14 @@ vim.fs.dir({path}, {opts})                                      *vim.fs.dir()*
                   iterator over the items located in {path}
 
     Return: ~
-        (`Iterator`) over items in {path}. Each iteration yields two values:
-        "name" and "type". "name" is the basename of the item relative to
-        {path}. "type" is one of the following: "file", "directory", "link",
-        "fifo", "socket", "char", "block", "unknown".
+        (`fun(): string?, string?, string?`) Iterator over items in {path},
+        yielding (name, type, err):
+        • name: Basename of the item relative to {path}.
+        • type: One of: "file", "directory", "link", "fifo", "socket", "char",
+          "block", "unknown".
+        • err: Error string, or nil. Only if `opts.err=true`. If the root
+          {path} itself could not be scanned, yields a single (name, nil, err)
+          item.
 
 vim.fs.dirname({file})                                      *vim.fs.dirname()*
     Gets the parent directory of the given path (not expanded/resolved, the
@@ -2705,9 +2725,10 @@ vim.fs.find({names}, {opts})                                   *vim.fs.find()*
                    through parent directories. Otherwise, search child
                    directories (recursively).
 
-    Return: ~
+    Return (multiple): ~
         (`string[]`) Normalized paths |vim.fs.normalize()| of all matching
-        items
+        items.
+        (`string[]`) Errors collected while searching.
 
 vim.fs.joinpath({...})                                     *vim.fs.joinpath()*
     Concatenates partial paths (one absolute or relative path followed by zero
@@ -2729,6 +2750,20 @@ vim.fs.joinpath({...})                                     *vim.fs.joinpath()*
     Return: ~
         (`string`)
 
+vim.fs.mkdir({path}, {opts})                                  *vim.fs.mkdir()*
+    Creates a directory.
+
+    Attributes: ~
+        Since: 0.13.0
+
+    Parameters: ~
+      • {path}  (`string`) Path to create (not expanded/resolved).
+      • {opts}  (`table?`) Optional keyword arguments.
+                • {mode}? (`integer`, default: `493`) Permission bits for
+                  newly-created directories.
+                • {parents}? (`boolean`, default: `false`) Create intermediate
+                  directories as necessary.
+
 vim.fs.normalize({path}, {opts})                          *vim.fs.normalize()*
     Normalize a path to a standard format. A tilde (~) character at the
     beginning of the path is expanded to the user's home directory and
@@ -2746,7 +2781,7 @@ vim.fs.normalize({path}, {opts})                          *vim.fs.normalize()*
 
     On Windows, backslash (\) characters are converted to forward slashes (/).
 
-    Examples: >lua
+    Examples: >
         [[C:\Users\jdoe]]                         => "C:/Users/jdoe"
         "~/src/neovim"                            => "/home/jdoe/src/neovim"
         "$XDG_CONFIG_HOME/nvim/init.vim"          => "/Users/jdoe/.config/nvim/init.vim"
@@ -2969,13 +3004,13 @@ vim.hl.priorities                                          *vim.hl.priorities*
       symbols or `hl_op` autocommands
 
                                                               *vim.hl.range()*
-vim.hl.range({buf}, {ns}, {higroup}, {start}, {finish}, {opts})
+vim.hl.range({buf}, {ns}, {hlgroup}, {start}, {finish}, {opts})
     Apply highlight group to range of text.
 
     Parameters: ~
       • {buf}      (`integer`) Buffer number to apply highlighting to
       • {ns}       (`integer`) Namespace to add highlight to
-      • {higroup}  (`integer|integer[]|string|string[]`) Highlight group used
+      • {hlgroup}  (`integer|integer[]|string|string[]`) Highlight group used
                    for the text range. See the `hl_group` option in
                    |nvim_buf_set_extmark()|.
       • {start}    (`[integer,integer]|string`) Start of region as a (line,
@@ -3677,8 +3712,8 @@ vim.json.decode({str}, {opts})                             *vim.json.decode()*
       • {str}   (`string`) Stringified JSON data.
       • {opts}  (`table?`) A table with the following fields:
                 • {luanil}? (`{ object?: boolean, array?: boolean }`, default:
-                  `nil`) Convert `null` in JSON objects and/or arrays to Lua
-                  `nil` instead of |vim.NIL|.
+                  `nil`) Convert JSON "null" in objects/arrays to Lua `nil`
+                  instead of |vim.NIL|.
                 • {skip_comments}? (`boolean`, default: `false`) Allows
                   JavaScript-style comments within JSON data. Comments are
                   treated as whitespace and may appear anywhere whitespace is
@@ -3921,14 +3956,14 @@ new({opts})                                                    *vim.log.new()*
 
     Parameters: ~
       • {opts}  (`table`) A table with the following fields:
-                • {current_level}? (`vim.log.levels`, default:
-                  `vim.log.levels.WARN`) Minimum level that will be written.
                 • {format_func}?
-                  (`fun(current_level: vim.log.levels, level: vim.log.levels, ...): string?`)
+                  (`fun(min_level: vim.log.levels, level: vim.log.levels, ...): string?`)
                   Formatter used for each log entry. Receives the logger's
-                  current level, the message level, and the values passed to
+                  minimum level, the message level, and the values passed to
                   the writer. Return a string to write an entry, or `nil` to
                   skip it.
+                • {level}? (`vim.log.levels`, default: `vim.log.levels.WARN`)
+                  Minimum level that will be written.
                 • {name} (`string`) Display name used in notifications emitted
                   by the logger.
 
@@ -3938,13 +3973,13 @@ new({opts})                                                    *vim.log.new()*
 set_format_func({log}, {func})                     *vim.log.set_format_func()*
     Sets the formatter used to produce log entries.
 
-    The formatter receives the logger's current level, the message level, and
+    The formatter receives the logger's minimum level, the message level, and
     the values passed to the writer method. Return a string to write an entry,
     or `nil` to skip it.
 
     Parameters: ~
       • {log}   (`vim.Log`) See |vim.Log|.
-      • {func}  (`fun(current_level: vim.log.levels, level: vim.log.levels, ...): string?`)
+      • {func}  (`fun(min_level: vim.log.levels, level: vim.log.levels, ...): string?`)
 
 set_level({log}, {level})                                *vim.log.set_level()*
     Sets the current log level.
@@ -4503,14 +4538,23 @@ by |vim.Pos| objects.
 cursor({buf}, {pos})                                        *vim.pos.cursor()*
     Creates a new |vim.Pos| from cursor position (see |api-indexing|).
 
+    If {pos} is omitted, the first argument is treated as {win} instead of
+    {buf}, and the current cursor position of {win} is used.
+
     Example: >lua
+        local buf = vim.api.nvim_win_get_buf(0)
         local cursor_pos = vim.api.nvim_win_get_cursor(0)
-        local pos = vim.pos.cursor(0, cursor_pos)
+        local pos = vim.pos.cursor(buf, cursor_pos)
+        -- This is equivalent:
+        local pos = vim.pos.cursor(0)
 <
 
     Parameters: ~
       • {buf}  (`integer`)
       • {pos}  (`[integer, integer]`) (lnum, col) tuple
+
+    Overloads: ~
+      • `fun(win: integer): vim.Pos`
 
     Return: ~
         (`vim.Pos`) See |vim.Pos|.
@@ -4554,7 +4598,7 @@ mark({buf}, {lnum}, {col})                                    *vim.pos.mark()*
     Creates a new |vim.Pos| from mark position (see |api-indexing|).
 
     Example: >lua
-        local mark_info = vim.api.nvim_get_mark('M', {})
+        local mark_info = vim.api.nvim_get_mark('M')
         local lnum, col, buf, name = unpack(mark_info)
 
         if lnum == 0 and col == 0 and buf == 0 then
@@ -4594,16 +4638,15 @@ to_cursor({pos})                                         *vim.pos.to_cursor()*
         local pos = vim.pos(0, 3, 5)
 
         -- Convert to cursor position, you can call it in a method style.
-        local cursor_pos = { pos:to_cursor() }
+        local cursor_pos = pos:to_cursor()
         vim.api.nvim_win_set_cursor(0, cursor_pos)
 <
 
     Parameters: ~
       • {pos}  (`vim.Pos`) See |vim.Pos|.
 
-    Return (multiple): ~
-        (`integer`) lnum
-        (`integer`) col
+    Return: ~
+        (`[integer, integer]`) (lnum, col) tuple
 
 to_extmark({pos})                                       *vim.pos.to_extmark()*
     Converts |vim.Pos| to extmark position (see |api-indexing|).
@@ -4647,7 +4690,7 @@ to_mark({pos})                                             *vim.pos.to_mark()*
 
         -- Convert to mark position, you can call it in a method style.
         local lnum, col = pos:to_mark()
-        vim.api.nvim_buf_set_mark(0, 'M', lnum, col, {})
+        vim.api.nvim_buf_set_mark(0, 'M', lnum, col)
 <
 
     Parameters: ~

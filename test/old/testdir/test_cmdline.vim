@@ -560,11 +560,13 @@ func Test_getcompletion()
   call assert_equal([], l)
 
   let l = getcompletion('', 'filetypecmd')
-  call assert_equal(["indent", "off", "on", "plugin"], l)
+  call assert_equal(["detect", "indent", "off", "on", "plugin"], l)
   let l = getcompletion('not', 'filetypecmd')
   call assert_equal([], l)
   let l = getcompletion('o', 'filetypecmd')
   call assert_equal(['off', 'on'], l)
+  let l = getcompletion('det', 'filetypecmd')
+  call assert_equal(['detect'], l)
 
   let l = getcompletion('tag', 'function')
   call assert_true(index(l, 'taglist(') >= 0)
@@ -1657,7 +1659,7 @@ func Test_lnum_and_pattern_as_range()
   2/foo/yank
   call assert_equal("foo 3\n", @")
   call assert_equal(1, line('.'))
-  close!
+  bw!
 endfunc
 
 " Tests for getcmdline(), getcmdpos() and getcmdtype()
@@ -1722,6 +1724,7 @@ func Test_getcmdtype_getcmdprompt()
 endfunc
 
 func Test_getcmdwintype()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   call feedkeys("q/:let a = getcmdwintype()\<CR>:q\<CR>", 'x!')
   call assert_equal('/', a)
 
@@ -1738,6 +1741,7 @@ func Test_getcmdwintype()
 endfunc
 
 func Test_getcmdwin_autocmd()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   let s:seq = []
   augroup CmdWin
   au WinEnter * call add(s:seq, 'WinEnter ' .. win_getid())
@@ -1854,6 +1858,7 @@ func Test_cmdline_overstrike()
 endfunc
 
 func Test_cmdwin_bug()
+  throw 'Skipped: Nvim supports cmdwin freedom #40312'
   let winid = win_getid()
   sp
   try
@@ -1955,6 +1960,7 @@ func Test_buffers_lastused()
 endfunc
 
 func Test_cmdwin_feedkeys()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   " This should not generate E488
   call feedkeys("q:\<CR>", 'x')
   " Using feedkeys with q: only should automatically close the cmd window
@@ -1966,6 +1972,7 @@ endfunc
 " Tests for the issues fixed in 7.4.441.
 " When 'cedit' is set to Ctrl-C, opening the command window hangs Vim
 func Test_cmdwin_cedit()
+  throw 'Skipped: Nvim supports cmdwin freedom #40312'
   exe "set cedit=\<C-c>"
   normal! :
   call assert_equal(1, winnr('$'))
@@ -2044,6 +2051,7 @@ func Test_cmdline_expand_special()
 endfunc
 
 func Test_cmdwin_jump_to_win()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   call assert_fails('call feedkeys("q:\<C-W>\<C-W>\<CR>", "xt")', 'E11:')
   new
   set modified
@@ -2060,6 +2068,7 @@ func Test_cmdwin_jump_to_win()
 endfunc
 
 func Test_cmdwin_tabpage()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   tabedit
   call assert_fails("silent norm q/g	:I\<Esc>", 'E11:')
   tabclose!
@@ -2226,7 +2235,7 @@ func Test_cmdline_ctrl_g()
   " 'insertmode'
   " call feedkeys(":set im\<cr>\<C-L>:\<C-\>\<C-G>12\<C-L>:set noim\<cr>", 'xt')
   " call assert_equal('ab12xyc', getline(1))
-  close!
+  bw!
 endfunc
 
 " Test for 'wildmode'
@@ -2553,6 +2562,7 @@ endfunc
 
 " Test for normal mode commands not supported in the cmd window
 func Test_cmdwin_blocked_commands()
+  throw 'Skipped: Nvim supports cmdwin freedom #40312'
   call assert_fails('call feedkeys("q:\<C-T>\<CR>", "xt")', 'E11:')
   call assert_fails('call feedkeys("q:\<C-]>\<CR>", "xt")', 'E11:')
   call assert_fails('call feedkeys("q:\<C-^>\<CR>", "xt")', 'E11:')
@@ -2584,6 +2594,7 @@ endfunc
 
 " Close the Cmd-line window in insert mode using CTRL-C
 func Test_cmdwin_insert_mode_close()
+  throw "Skipped: Nvim supports cmdwin freedom #40312"
   %bw!
   let s = ''
   exe "normal q:a\<C-C>let s='Hello'\<CR>"
@@ -3535,7 +3546,7 @@ endfunc
 func Test_fuzzy_completion_bufname_fullpath()
   CheckUnix
   set wildoptions&
-  call mkdir('Xcmd/Xstate/Xfile.js', 'pR')
+  call mkdir('Xcmd/Xstate', 'pR')
   edit Xcmd/Xstate/Xfile.js
   cd Xcmd/Xstate
   enew
@@ -3572,7 +3583,9 @@ endfunc
 func Test_completion_filetypecmd()
   set wildoptions&
   call feedkeys(":filetype \<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_equal('"filetype indent off on plugin', @:)
+  call assert_equal('"filetype detect indent off on plugin', @:)
+  call feedkeys(":filetype det\<C-A>\<C-B>\"\<CR>", 'tx')
+  call assert_equal('"filetype detect', @:)
   call feedkeys(":filetype plugin \<C-A>\<C-B>\"\<CR>", 'tx')
   call assert_equal('"filetype plugin indent off on', @:)
   call feedkeys(":filetype indent \<C-A>\<C-B>\"\<CR>", 'tx')
@@ -3585,6 +3598,10 @@ func Test_completion_filetypecmd()
   call assert_equal('"filetype off on', @:)
   call feedkeys(":filetype indent of\<C-A>\<C-B>\"\<CR>", 'tx')
   call assert_equal('"filetype indent off', @:)
+  call feedkeys(":filetype plugin\<C-A>\<C-B>\"\<CR>", 'tx')
+  call assert_equal('"filetype plugin', @:)
+  call feedkeys(":filetype plugin indent\<C-A>\<C-B>\"\<CR>", 'tx')
+  call assert_equal('"filetype plugin indent', @:)
   set wildoptions&
 endfunc
 
@@ -4706,6 +4723,52 @@ func Test_customlist_dict_completion_info_popup()
   call term_sendkeys(buf, "\<C-U>sign un\<C-X>\<C-V>")
   call VerifyScreenDump(buf, 'Test_customlist_info_popup_11', {})
 
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test that the mouse scroll wheel scrolls the info popup of the command line
+" completion popup menu when the mouse pointer is on top of it.
+func Test_wildmenu_pum_info_mouse_scroll()
+  CheckScreendump
+  CheckFeature quickfix
+
+  let lines =<< trim END
+    func DictComp(A, L, P)
+      let info = join(map(range(1, 30), '"info line " .. v:val'), "\n")
+      return [
+            \ {'word': 'apple',  'kind': 'f', 'menu': 'fruit', 'info': info},
+            \ {'word': 'banana', 'kind': 'f', 'menu': 'fruit', 'info': info},
+            \ ]
+    endfunc
+    command -nargs=1 -complete=customlist,DictComp DictCmd echo <q-args>
+    set wildmenu wildoptions=pum completeopt=menu,popup mouse=a
+
+    " Put the mouse on top of the info popup and turn the scroll wheel.
+    func ScrollInfo(keys)
+      let pos = popup_getpos(popup_findinfo())
+      call test_setmouse(pos.line + 1, pos.col + 1)
+      call feedkeys(a:keys, 'nt')
+    endfunc
+    cnoremap <F6> <Cmd>call ScrollInfo(repeat("\<ScrollWheelDown>", 3))<CR>
+    cnoremap <F7> <Cmd>call ScrollInfo(repeat("\<ScrollWheelUp>", 2))<CR>
+  END
+  call writefile(lines, 'XtestWildmenuMouseScroll', 'D')
+  let buf = RunVimInTerminal('-S XtestWildmenuMouseScroll', #{rows: 12})
+
+  " The info popup is shown next to the completion popup menu.
+  call term_sendkeys(buf, ":DictCmd \<Tab>")
+  call VerifyScreenDump(buf, 'Test_wildmenu_pum_info_mouse_scroll_1', {})
+
+  " Scrolling down with the wheel scrolls the info popup without closing the
+  " completion popup menu.
+  call term_sendkeys(buf, "\<F6>")
+  call VerifyScreenDump(buf, 'Test_wildmenu_pum_info_mouse_scroll_2', {})
+
+  " Scrolling back up scrolls the info popup up again.
+  call term_sendkeys(buf, "\<F7>")
+  call VerifyScreenDump(buf, 'Test_wildmenu_pum_info_mouse_scroll_3', {})
+
+  call term_sendkeys(buf, "\<Esc>")
   call StopVimInTerminal(buf)
 endfunc
 

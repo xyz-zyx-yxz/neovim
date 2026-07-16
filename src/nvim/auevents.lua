@@ -22,6 +22,7 @@ return {
     BufWriteCmd = true, -- write buffer using command
     BufWritePost = true, -- after writing a buffer
     BufWritePre = true, -- before writing a buffer
+    ChanClose = false,
     ChanInfo = false, -- info was received about channel
     ChanOpen = false, -- channel was opened
     CmdUndefined = false, -- command undefined
@@ -97,6 +98,7 @@ return {
     SearchWrapped = true, -- after the search wrapped around
     SessionLoadPost = false, -- after loading a session file
     SessionLoadPre = false, -- before loading a session file
+    SessionWritePre = false, -- before writing a session file
     SessionWritePost = false, -- after writing a session file
     ShellCmdPost = false, -- after ":!cmd"
     ShellFilterPost = true, -- after ":1,2!cmd", ":w !cmd", ":r !cmd".
@@ -171,6 +173,7 @@ return {
     Progress = true,
     RecordingEnter = true,
     RecordingLeave = true,
+    SessionWritePre = true,
     Signal = true,
     TabMoved = true,
     TabNewEntered = true,

@@ -168,11 +168,15 @@ vim.o.ai = vim.o.autoindent
 vim.bo.autoindent = vim.o.autoindent
 vim.bo.ai = vim.bo.autoindent
 
---- When a file has been detected to have been changed outside of Vim and
---- it has not been changed inside of Vim, automatically read it again.
---- When the file has been deleted this is not done, so you have the text
---- from before it was deleted.  When it appears again then it is read.
---- `timestamp`
+--- When a file was changed outside of Nvim, automatically read it again.
+--- Skipped if the file was deleted (so you still have the last-available
+--- text). If the file appears again, then it is read; you can `undo` to
+--- see the previous contents. `timestamp`
+---
+--- This is driven (partially) by OS filewatcher events `uv_fs_event_t`,
+--- so buffers are updated immediately (instead of only on focus-change or
+--- shell-commands).
+---
 --- If this option has a local value, use this command to switch back to
 --- using the global value:
 ---
@@ -224,11 +228,15 @@ vim.go.awa = vim.go.autowriteall
 
 --- When set to "dark" or "light", adjusts the default color groups for
 --- that background type.  The `TUI` or other UI sets this on startup
---- if it can detect the background color.
+--- if it can detect the background color, and re-detects it whenever a UI
+--- attaches later, unless 'background' was set explicitly.  When multiple
+--- UIs are attached they share one value, decided by "last wins" (may
+--- not be the most recently-attached UI, since it depends on response
+--- speed).
 ---
 --- This option does NOT change the background color, it tells Nvim what
---- the "inherited" (terminal/GUI) background looks like.
---- See `:hi-normal` if you want to set the background color explicitly.
+--- the "inherited" (terminal/GUI) background looks like. See `:hi-normal`
+--- to set the background color explicitly.
 --- 					*g:colors_name*
 --- When a color scheme is loaded (the "g:colors_name" variable is set)
 --- changing 'background' will cause the color scheme to be reloaded.  If
@@ -236,17 +244,16 @@ vim.go.awa = vim.go.autowriteall
 --- However, if the color scheme sets 'background' itself the effect may
 --- be undone.  First delete the "g:colors_name" variable when needed.
 ---
---- Normally this option would be set in the vimrc file.  Possibly
---- depending on the terminal name.  Example:
+--- Historically, this option was set in the vimrc file.  Example:
 ---
 --- ```vim
 --- 	if $TERM ==# "xterm"
 --- 	  set background=dark
 --- 	endif
 --- ```
---- When this option is changed, the default settings for the highlight groups
---- will change.  To use other settings, place ":highlight" commands AFTER
---- the setting of the 'background' option.
+--- When this option is changed, the defaults for highlight groups
+--- will change.  To override those defaults, place ":highlight" commands
+--- AFTER setting the 'background' option.
 ---
 --- @type 'light'|'dark'
 vim.o.background = "dark"
@@ -2184,6 +2191,7 @@ vim.go.ei = vim.go.eventignore
 --- Note: The following events are considered to happen outside of a
 --- window context and thus cannot be ignored by 'eventignorewin':
 ---
+--- 	`ChanClose`,
 --- 	`ChanInfo`,
 --- 	`ChanOpen`,
 --- 	`CmdUndefined`,
@@ -2227,6 +2235,7 @@ vim.go.ei = vim.go.eventignore
 --- 	`SessionLoadPost`,
 --- 	`SessionLoadPre`,
 --- 	`SessionWritePost`,
+--- 	`SessionWritePre`,
 --- 	`ShellCmdPost`,
 --- 	`Signal`,
 --- 	`SourceCmd`,
@@ -4879,6 +4888,15 @@ vim.o.opfunc = vim.o.operatorfunc
 vim.go.operatorfunc = vim.o.operatorfunc
 vim.go.opfunc = vim.go.operatorfunc
 
+--- Path of `vim.pack-lockfile`. Must be set before the first usage of any
+--- `vim.pack` function. Environment variables are expanded `:set_env`.
+---
+--- @type string
+vim.o.packlockfile = "$XDG_CONFIG_HOME/nvim/nvim-pack-lock.json"
+vim.o.plf = vim.o.packlockfile
+vim.go.packlockfile = vim.o.packlockfile
+vim.go.plf = vim.go.packlockfile
+
 --- Directories used to find packages.
 --- See `packages` and `packages-runtimepath`.
 --- Environment variables are expanded `:set_env`.
@@ -5362,6 +5380,13 @@ vim.go.ru = vim.go.ruler
 --- 	set rulerformat=%15(%c%V\ %p%%%)
 --- ```
 ---
+--- This looks like an item group, but there are some differences in this
+--- particular case.  Most notably, the width is fixed and not a minimum,
+--- and the ruler is left-aligned, whereas the alignment of item groups is
+--- configurable and right-aligned by default.
+---
+--- When `ui2` is enabled, the ruler no longer has a fixed width and the
+--- item group syntax has no special meaning for 'rulerformat'.
 ---
 --- @type string
 vim.o.rulerformat = ""
@@ -5472,15 +5497,16 @@ vim.o.scbk = vim.o.scrollback
 vim.bo.scrollback = vim.o.scrollback
 vim.bo.scbk = vim.bo.scrollback
 
---- See also `scroll-binding`.  When this option is set, scrolling the
---- current window also scrolls other scrollbind windows (windows that
---- also have this option set).  This option is useful for viewing the
---- differences between two versions of a file, see 'diff'.
---- See 'scrollopt' for options that determine how this option should be
---- interpreted.
---- This option is mostly reset when splitting a window to edit another
---- file.  This means that ":split | edit file" results in two windows
---- with scroll-binding, but ":split file" does not.
+--- Enables synchronized scrolling (in all windows with this option set).
+--- Useful for comparing two versions of a file, see 'diff'.
+--- Behavior is controlled by 'scrollopt'. See `scroll-binding`.
+---
+--- This option is (usually) reset when splitting a window to edit another
+--- file: ":split | edit file" results in two windows with scroll-binding,
+--- but ":split file" does not.
+---
+--- Note: Consider calling `:syncbind` on `WinResized`, `WinEnter` events
+--- (scoped to relevant buffers).
 ---
 --- @type boolean
 vim.o.scrollbind = false
@@ -5913,12 +5939,12 @@ vim.go.shcf = vim.go.shellcmdflag
 --- For MS-Windows the default is "2>&1| tee".  The stdout and stderr are
 --- saved in a file and echoed to the screen.
 --- For Unix the default is "| tee".  The stdout of the compiler is saved
---- in a file and echoed to the screen.  If the 'shell' option is "csh" or
---- "tcsh" after initializations, the default becomes "|& tee".  If the
---- 'shell' option is "sh", "ksh", "mksh", "pdksh", "zsh", "zsh-beta",
---- "bash", "fish", "ash" or "dash" the default becomes "2>&1| tee".  This
---- means that stderr is also included.  Before using the 'shell' option a
---- path is removed, thus "/bin/sh" uses "sh".
+--- in a file and echoed to the screen.  If the 'shell' option contains
+--- "csh" (e.g. "tcsh") after initializations, the default becomes
+--- "|& tee".  Otherwise, if it contains "sh" (e.g. "bash", "zsh"), the
+--- default becomes "2>&1| tee".  This means that stderr is also included.
+--- Before using the 'shell' option a path is removed, thus "/bin/sh" uses
+--- "sh".
 --- The initialization of this option is done after reading the vimrc
 --- and the other initializations, so that when the 'shell' option is set
 --- there, the 'shellpipe' option changes automatically, unless it was
@@ -5963,12 +5989,12 @@ vim.go.shq = vim.go.shellquote
 --- The name of the temporary file can be represented by "%s" if necessary
 --- (the file name is appended automatically if no %s appears in the value
 --- of this option).
---- The default is ">".  For Unix, if the 'shell' option is "csh" or
---- "tcsh" during initializations, the default becomes ">&".  If the
---- 'shell' option is "sh", "ksh", "mksh", "pdksh", "zsh", "zsh-beta",
---- "bash" or "fish", the default becomes ">%s 2>&1".  This means that
---- stderr is also included.  For Win32, the Unix checks are done and
---- additionally "cmd" is checked for, which makes the default ">%s 2>&1".
+--- The default is ">".  For Unix, if the 'shell' option contains "csh"
+--- (e.g. "tcsh") during initializations, the default becomes ">&".
+--- Otherwise, if it contains "sh" (e.g. "bash", "zsh"), the default
+--- becomes ">%s 2>&1". This means that stderr is also included.  For
+--- Win32, the Unix checks are done and additionally "cmd" is checked
+--- for, which makes the default ">%s 2>&1".
 --- Also, the same names with ".exe" appended are checked for.
 --- The initialization of this option is done after reading the vimrc
 --- and the other initializations, so that when the 'shell' option is set
@@ -6692,11 +6718,6 @@ vim.go.sol = vim.go.startofline
 --- When using `v:relnum`, keep in mind that cursor movement by itself will
 --- not cause the 'statuscolumn' to update unless 'relativenumber' is set.
 ---
---- NOTE: The %@ click execute function item is supported as well but the
---- specified function will be the same for each row in the same column.
---- It cannot be switched out through a dynamic 'statuscolumn' format, the
---- handler should be written with this in mind.
----
 --- Examples:
 ---
 --- ```vim
@@ -6872,12 +6893,16 @@ vim.wo.stc = vim.wo.statuscolumn
 ---          this label.
 ---       Use `getmousepos()`.winid in the specified function to get the
 ---       corresponding `window-ID` of the clicked item.
---- \< -   Where to truncate line if too long.  Default is at the start.
+--- \< -   Where to truncate line if too long.  Default is at the first
+---       item.  Truncation markers within item groups apply to the
+---       truncation of that group until its maxwid is reached.
 ---       No width fields allowed.
 --- = -   Separation point between alignment sections.  Each section will
 ---       be separated by an equal number of spaces.  With one %= what
 ---       comes after it will be right-aligned.  With two %= there is a
 ---       middle part, with white space left and right of it.
+---       Alignment sections within item groups will be separated until
+---       minwid of the group is reached.
 ---       No width fields allowed.
 --- # -   Set highlight group.  The name must follow and then a # again.
 ---       Thus use %#HLname# for highlight group HLname.  The same
@@ -7015,24 +7040,20 @@ vim.o.sua = vim.o.suffixesadd
 vim.bo.suffixesadd = vim.o.suffixesadd
 vim.bo.sua = vim.bo.suffixesadd
 
---- Use a swapfile for the buffer.  This option can be reset when a
---- swapfile is not wanted for a specific buffer.  For example, with
---- confidential information that even root must not be able to access.
---- Careful: All text will be in memory:
---- 	- Don't use this for big files.
---- 	- Recovery will be impossible!
---- A swapfile will only be present when 'updatecount' is non-zero and
---- 'swapfile' is set.
---- When 'swapfile' is reset, the swap file for the current buffer is
---- immediately deleted.  When 'swapfile' is set, and 'updatecount' is
---- non-zero, a swap file is immediately created.
---- Also see `swap-file`.
---- If you want to open a new buffer without creating a swap file for it,
---- use the `:noswapfile` modifier.
---- See 'directory' for where the swap file is created.
+--- Use a `swap-file` for the buffer (if 'updatecount' is non-zero). The
+--- 'directory' option decides where swapfiles are stored.
 ---
---- This option is used together with 'bufhidden' and 'buftype' to
---- specify special kinds of buffers.   See `special-buffers`.
+--- To open a new buffer without creating a swapfile, use `:noswapfile`.
+--- To disable for an existing buffer, reset its 'swapfile' option.
+--- Careful:
+--- 	- Recovery will be impossible!
+--- 	- The entire file will be in memory.
+---
+--- When reset, the swapfile for the current buffer is immediately
+--- deleted.  When re-enabled (and 'updatecount' is non-zero), a swapfile
+--- is immediately created.
+---
+--- Used with 'bufhidden' and 'buftype' to specify `special-buffers`.
 ---
 --- @type boolean
 vim.o.swapfile = true
@@ -7694,17 +7715,15 @@ vim.o.ur = vim.o.undoreload
 vim.go.undoreload = vim.o.undoreload
 vim.go.ur = vim.go.undoreload
 
---- After typing this many characters the swap file will be written to
---- disk.  When zero, no swap file will be created at all (see chapter on
---- recovery `crash-recovery`).  'updatecount' is set to zero by starting
---- Vim with the "-n" option, see `startup`.  When editing in readonly
---- mode this option will be initialized to 10000.
---- The swapfile can be disabled per buffer with 'swapfile'.
---- When 'updatecount' is set from zero to non-zero, swap files are
---- created for all buffers that have 'swapfile' set.  When 'updatecount'
---- is set to zero, existing swap files are not deleted.
---- This option has no meaning in buffers where 'buftype' is "nofile" or
---- "nowrite".
+--- The `swap-file` will be written after typing this many characters.
+---
+--- - Ignored in buffers where 'buftype' is "nofile" or "nowrite".
+--- - Initialized to 10000 when editing in readonly `-R` mode.
+--- - To disable swapfiles per-buffer, unset the 'swapfile' option.
+--- - To disable swapfiles globally, set this option to zero (or start
+---   with `-n`). See `crash-recovery`. Existing swapfiles are not deleted.
+--- - When re-enabled (from zero to non-zero), swapfiles are created for
+---   all buffers that have 'swapfile' set.
 ---
 --- @type integer
 vim.o.updatecount = 200
@@ -8175,7 +8194,10 @@ vim.go.wim = vim.go.wildmode
 --- 		is not supported for file and directory names and
 --- 		instead wildcard expansion is used.
 ---   pum		Display the completion matches using the popup menu in
---- 		the same style as the `ins-completion-menu`.
+--- 		the same style as the `ins-completion-menu`.  When an
+--- 		info popup is shown next to the menu, it can be
+--- 		scrolled by moving the mouse pointer on top of it and
+--- 		using the scroll wheel.
 ---   tagfile	When using CTRL-D to list matching tags, the kind of
 --- 		tag and the file of the tag is listed.	Only one match
 --- 		is displayed per line.  Often used tag kinds are:

@@ -62,7 +62,7 @@ describe('messages2', function()
       {3:                                                     }|
       ^foo                                                  |
       bar                                                  |
-                                          1,1           All|
+                                         1,1            All|
     ]])
     -- Multiple messages in same event loop iteration are appended and shown in full.
     feed([[q:echo "foo" | echo "bar\nbaz\n"->repeat(&lines)<CR>]])
@@ -86,14 +86,21 @@ describe('messages2', function()
     screen:expect([[
       ^                                                     |
       {1:~                                                    }|*12
-      foo                                 0,0-1         All|
+      foo                                0,0-1          All|
     ]])
     command('echo "foo"')
     -- Ruler still positioned correctly after dupe message.
     screen:expect([[
       ^                                                     |
       {1:~                                                    }|*12
-      foo(1)                              0,0-1         All|
+      foo(1)                             0,0-1          All|
+    ]])
+    command('echo "foo"')
+    -- Dupe counter increases beyond 1
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      foo(2)                             0,0-1          All|
     ]])
     -- No error for ruler virt_text msg_row exceeding buffer length.
     command([[map Q <cmd>echo "foo\nbar" <bar> ls<CR>]])
@@ -110,7 +117,7 @@ describe('messages2', function()
     screen:expect([[
       ^                                                     |
       {1:~                                                    }|*12
-                                          0,0-1         All|
+                                         0,0-1          All|
     ]])
     -- g< shows messages from last command
     feed('g<lt>')
@@ -121,20 +128,20 @@ describe('messages2', function()
       ^foo                                                  |
       bar                                                  |
         1 %a   "[No Name]"                    line 1       |
-                                          1,1           All|
+                                         1,1            All|
     ]])
     -- edit_unputchar() does not clear already updated screen #34515.
     feed('qix<Esc>dwi<C-r>')
     screen:expect([[
       {18:^"}                                                    |
       {1:~                                                    }|*12
-                               ^R         1,1           All|
+                              ^R         1,1            All|
     ]])
     feed('-<Esc>')
     screen:expect([[
       ^x                                                    |
       {1:~                                                    }|*12
-                                          1,1           All|
+                                         1,1            All|
     ]])
     -- Switching tabpage closes expanded cmdline #37659.
     command('tabnew | echo "foo\nbar"')
@@ -151,7 +158,7 @@ describe('messages2', function()
       {5: + [No Name] }{24: [No Name] }{2:                            }{24:X}|
       ^x                                                    |
       {1:~                                                    }|*11
-      foo [+1]                            1,1           All|
+      foo [+1]                           1,1            All|
     ]])
     -- Don't enter the pager in insert mode.
     command('tabonly | call nvim_echo([["foo\n"]]->repeat(&lines), 1, {}) | startinsert')
@@ -167,7 +174,7 @@ describe('messages2', function()
                                                            |
       ^x                                                    |
       {1:~                                                    }|*11
-      foo [+14]                           2,1           All|
+      foo [+14]                          2,1            All|
     ]])
     feed('<BS><Esc>')
     -- First multiline message expands cmdline, additional message updates spill indicator.
@@ -185,7 +192,7 @@ describe('messages2', function()
     screen:expect([[
       ^foo                                                  |
       foo                                                  |*12
-                                          1,1           Top|
+                                         1,1            Top|
     ]])
     -- Changing 'laststatus' reveals the global statusline with a pager height
     -- exceeding the available lines: #38008.
@@ -198,7 +205,9 @@ describe('messages2', function()
     ]])
     feed(':<C-F>')
     screen:expect([[
-      foo                                                  |*5
+      x                                                    |
+      {1:~                                                    }|*3
+      ─────────────────────────────────────────────────────|
       {1::}echo "foo" | echo "bar\nbaz\n"->repeat(&lines)      |
       {1::}^                                                    |
       {1:~                                                    }|*5
@@ -207,7 +216,9 @@ describe('messages2', function()
     ]])
     command('wincmd +')
     screen:expect([[
-      foo                                                  |*4
+      x                                                    |
+      {1:~                                                    }|*2
+      ─────────────────────────────────────────────────────|
       {1::}echo "foo" | echo "bar\nbaz\n"->repeat(&lines)      |
       {1::}^                                                    |
       {1:~                                                    }|*6
@@ -216,21 +227,27 @@ describe('messages2', function()
     ]])
     command('echo "foo"')
     screen:expect([[
-      foo                                                  |*4
+      x                                                    |
+      {1:~                                                    }|*2
+      ─────────────────────────────────────────────────────|
       {1::}echo "foo" | echo "bar\nbaz\n"->repeat(&lines)      |
       {1::}^                                                    |
       {1:~                                                    }|*6
       {3:[Command Line]                     2,0-1          All}|
       foo                                                  |
     ]])
+    -- <C-C> closes the cmdwin and drops back into pre-filled cmdline. The pager remains visible.
     feed('<C-C>')
     screen:expect([[
-      foo                                                  |*12
+      x                                                    |
+      {1:~                                                    }|*11
       {3:[Pager]                            1,1            Top}|
       {16::}^                                                    |
     ]])
-    -- Can enter pager from cmdwin.
-    feed('<Esc>qq:')
+    feed('<Esc><Esc>')
+    -- Can enter pager from cmdwin (use cmdwin.open() since "q" is consumed by the pager on_key
+    -- callback before nv_record can read it).
+    exec_lua([[require('vim._core.cmdwin').open(':')]])
     screen:expect([[
       x                                                    |
       {1:~                                                    }|*3
@@ -244,9 +261,10 @@ describe('messages2', function()
     feed(':messages<CR>')
     screen:expect([[
       ^foo                                                  |
-      foo                                                  |*11
+      foo                                                  |*4
+      {1:~                                                    }|*7
       {3:[Pager]                            1,1            Top}|
-                                                           |
+      {16::}{15:messages}                                            |
     ]])
     -- Cmdwin is restored after pager is closed.
     feed('q')
@@ -259,7 +277,7 @@ describe('messages2', function()
       {1::}^                                                    |
       {1:~                                                    }|*4
       {3:[Command Line]                     3,0-1          All}|
-                                                           |
+      {16::}{15:messages}                                            |
     ]])
     -- Configured maximum height.
     command('quit | lua require("vim._core.ui2").enable({msg = {pager = {height = 2 } } })')
@@ -271,7 +289,7 @@ describe('messages2', function()
       ^foo                                                  |
       foo                                                  |
       {3:[Pager]                            1,1            Top}|
-                                                           |
+      {16::}{15:messages}                                            |
     ]])
   end)
 
@@ -1070,6 +1088,133 @@ describe('messages2', function()
       ^                                                     |
       {1:~                                                    }|*12
       foo [+1]                                             |
+    ]])
+  end)
+
+  it('search count is cleared', function()
+    command('set ruler showcmd shortmess-=S | call setline(1, ["foo", "bar"])')
+    feed('/foo<CR>')
+    local search_count = [[
+      {10:^foo}                                                  |
+      bar                                                  |
+      {1:~                                                    }|*11
+      /foo           W [1/1]             1,1            All|
+    ]]
+    screen:expect(search_count)
+    feed('<C-L>j')
+    screen:expect([[
+      {10:foo}                                                  |
+      ^bar                                                  |
+      {1:~                                                    }|*11
+                                         2,1            All|
+    ]])
+    feed('n')
+    screen:expect(search_count)
+    command('echo "-"->repeat(&columns)')
+    screen:expect([[
+      {10:^foo}                                                  |
+      bar                                                  |
+      {1:~                                                    }|*11
+      -----------------------------------1,1            All|
+    ]])
+  end)
+
+  it('crops long messages to make place for ruler', function()
+    command('set noruler | echo "-"->repeat(&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      -----------------------------------------------------|
+    ]])
+    feed('<C-L>')
+    command('set ruler showcmd | echo "-"->repeat(&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      -----------------------------------0,0-1          All|
+    ]])
+    feed('<C-L>')
+    -- message with multibyte characters
+    command('echo "∙"->repeat(&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      ∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙∙0,0-1          All|
+    ]])
+    feed('<C-L>')
+    -- message with multicell characters
+    command('echo "-".."🙂"->repeat(&columns/2-1)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      -🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂0,0-1          All|
+    ]])
+    feed('<C-L>')
+    command('echo "🙂"->repeat(&columns/2)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂 0,0-1          All|
+    ]])
+    feed('<C-L>')
+    -- when cmdheight>1, only the last line is cropped
+    command('set cmdheight=2 | redraw | echo "-"->repeat(2*&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*11
+      -----------------------------------------------------|
+      -----------------------------------0,0-1          All|
+    ]])
+    feed('<C-L>')
+    command('set cmdheight=2 showbreak=> | redraw | echo "-"->repeat(2*&columns-1)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*11
+      -----------------------------------------------------|
+      {1:>}----------------------------------0,0-1          All|
+    ]])
+    command('set showbreak&')
+    feed('<C-L>')
+    -- ruler is not shown after dismissing expanded cmdline with key press -> no need to crop
+    command('set cmdheight=1 | redraw | echo "-"->repeat(2*&columns)')
+    feed('k')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      -----------------------------------------------------|
+    ]])
+    feed('<C-L>')
+    -- messages are deferred until showcmd is cleared -> no need to crop for showcmd
+    command('lua vim.defer_fn(function() vim.cmd[[echo "-"->repeat(&columns)]] end, 50)')
+    feed('g')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+                              g          0,0-1          All|
+    ]])
+    screen:sleep(100)
+    feed('<Esc>')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      -----------------------------------0,0-1          All|
+    ]])
+    feed('<C-L>')
+    -- message with repetition indicator keeps ruler intact
+    command('echo "-"->repeat(&columns)')
+    command('echo "-"->repeat(&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      --------------------------------(1)0,0-1          All|
+    ]])
+    feed('<C-L>')
+    -- when the ruler is configured smaller, there is more space for messages
+    command('set rulerformat=%l | redraw | echo "-"->repeat(&columns)')
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*12
+      ----------------------------------------------------0|
     ]])
   end)
 end)

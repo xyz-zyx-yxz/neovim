@@ -8,18 +8,21 @@
 #include "nvim/buffer.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/charset.h"
+#include "nvim/cmdexpand.h"
 #include "nvim/cursor.h"
 #include "nvim/decoration.h"
+#include "nvim/diff.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/eval.h"
 #include "nvim/eval/typval.h"
+#include "nvim/eval/vars.h"
 #include "nvim/ex_docmd.h"
 #include "nvim/fold.h"
-#include "nvim/getchar.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/grid_defs.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/keycodes.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mark_defs.h"
@@ -540,7 +543,7 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
       }
 
       // click in a tab selects that tab page
-      if (is_click && cmdwin_type == 0 && mouse_col < Columns) {
+      if (is_click && mouse_col < Columns) {
         int tabnr = tab_page_click_defs[mouse_col].tabnr;
         in_tab_line = true;
 
@@ -660,6 +663,22 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
     jump_flags = jump_to_mouse(jump_flags, oap == NULL ? NULL : &(oap->inclusive), which_button);
   }
 
+  if (mod_mask == 0
+      && !is_drag
+      && (jump_flags & (MOUSE_FOLD_CLOSE | MOUSE_FOLD_OPEN))
+      && which_button == MOUSE_LEFT) {
+    // open or close a fold at this line
+    if (jump_flags & MOUSE_FOLD_OPEN) {
+      openFold(curwin->w_cursor, 1);
+    } else {
+      closeFold(curwin->w_cursor, 1);
+    }
+    // don't move the cursor if still in the same window
+    if (curwin == old_curwin) {
+      curwin->w_cursor = save_cursor;
+    }
+  }
+
   bool moved = (jump_flags & CURSOR_MOVED);
   bool in_winbar = (jump_flags & MOUSE_WINBAR);
   bool in_statuscol = (jump_flags & MOUSE_STATUSCOL);
@@ -678,8 +697,21 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
     }
 
     StlClickDefinition *click_defs = in_status_line ? wp->w_status_click_defs
-                                                    : in_winbar ? wp->w_winbar_click_defs
-                                                                : wp->w_statuscol_click_defs;
+                                                    : in_winbar ? wp->w_winbar_click_defs : NULL;
+    if (in_statuscol && wp->w_p_rl) {
+      click_col = wp->w_view_width - click_col - 1;
+    }
+
+    if (in_statuscol) {
+      int lnum = (int)get_vim_var_nr(VV_LNUM);
+      int virtnum = (int)get_vim_var_nr(VV_VIRTNUM);
+      StcClicks lnum_click_defs = map_get(int, StcClicks)(wp->w_statuscol_click_defs, lnum);
+      StcClick row_click_defs = map_get(int, StcClick)(&lnum_click_defs, virtnum);
+      if (click_col >= (int)row_click_defs.size) {
+        return false;
+      }
+      click_defs = row_click_defs.def;
+    }
 
     if (in_global_statusline) {
       // global statusline is displayed for the current window,
@@ -688,14 +720,8 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
       click_col = mouse_col;
     }
 
-    if (in_statuscol && wp->w_p_rl) {
-      click_col = wp->w_view_width - click_col - 1;
-    }
-
-    if ((in_statuscol && click_col >= (int)wp->w_statuscol_click_defs_size)
-        || (in_status_line
-            && click_col >=
-            (int)(in_global_statusline ? curwin : wp)->w_status_click_defs_size)) {
+    if (in_status_line && click_col >=
+        (int)(in_global_statusline ? curwin : wp)->w_status_click_defs_size) {
       return false;
     }
 
@@ -717,10 +743,7 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
         break;
       }
     }
-
-    if (!(in_statuscol && (jump_flags & (MOUSE_FOLD_CLOSE|MOUSE_FOLD_OPEN)))) {
-      return false;
-    }
+    return false;
   } else if (in_winbar || in_statuscol) {
     // A drag or release event in the window bar and status column has no side effects.
     return false;
@@ -730,22 +753,6 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
   // friendlier than beeping and not jumping to that window.
   if (curwin != old_curwin && oap != NULL && oap->op_type != OP_NOP) {
     clearop(oap);
-  }
-
-  if (mod_mask == 0
-      && !is_drag
-      && (jump_flags & (MOUSE_FOLD_CLOSE | MOUSE_FOLD_OPEN))
-      && which_button == MOUSE_LEFT) {
-    // open or close a fold at this line
-    if (jump_flags & MOUSE_FOLD_OPEN) {
-      openFold(curwin->w_cursor, 1);
-    } else {
-      closeFold(curwin->w_cursor, 1);
-    }
-    // don't move the cursor if still in the same window
-    if (curwin == old_curwin) {
-      curwin->w_cursor = save_cursor;
-    }
   }
 
   // Set global flag that we are extending the Visual area with mouse dragging;
@@ -860,7 +867,7 @@ bool do_mouse(oparg_T *oap, int c, int dir, int count, bool fixindent)
     }
     prep_redo(regname, count, NUL, c1, NUL, c2, NUL);
 
-    // Remember where the paste started, so in edit() Insstart can be set to this position
+    // Remember where the paste started, so in edit() Ins.start can be set to this position
     if (restart_edit != 0) {
       where_paste_started = curwin->w_cursor;
     }
@@ -1135,6 +1142,58 @@ void ins_mousescroll(int dir)
   }
 }
 
+/// Command-line mode implementation for scrolling in direction "dir", which is
+/// one of the MSCR_ values.  Scrolls the completion info popup when the mouse
+/// pointer is on top of it.
+/// Returns true when the info popup was scrolled.
+bool cmdline_mousescroll(int dir)
+{
+  cmdarg_T cap;
+  oparg_T oa;
+  CLEAR_FIELD(cap);
+  clear_oparg(&oa);
+  cap.oap = &oa;
+  cap.arg = dir;
+
+  switch (dir) {
+  case MSCR_UP:
+    cap.cmdchar = K_MOUSEUP; break;
+  case MSCR_DOWN:
+    cap.cmdchar = K_MOUSEDOWN; break;
+  case MSCR_LEFT:
+    cap.cmdchar = K_MOUSELEFT; break;
+  case MSCR_RIGHT:
+    cap.cmdchar = K_MOUSERIGHT; break;
+  }
+
+  if (mouse_row < 0 || mouse_col < 0) {
+    return false;
+  }
+
+  int grid = mouse_grid;
+  int row = mouse_row;
+  int col = mouse_col;
+
+  // Only scroll when the mouse is on top of the info popup.
+  win_T *wp = mouse_find_win_inner(&grid, &row, &col);
+  if (wp == NULL || !wp->w_float_is_info) {
+    return false;
+  }
+
+  win_T *old_curwin = curwin;
+
+  curwin = wp;
+  curbuf = wp->w_buffer;
+  // Call the common mouse scroll function shared with other modes.
+  do_mousescroll(&cap);
+  curwin = old_curwin;
+  curbuf = curwin->w_buffer;
+
+  // Cmdline mode doesn't normally call update_screen(), so call it here.
+  update_screen();
+  return true;
+}
+
 /// Return true if "c" is a mouse key.
 bool is_mouse_key(int c)
 {
@@ -1356,18 +1415,10 @@ retnomove:
                 && !sep_line_offset
                 && (wp->w_p_rl
                     ? col < wp->w_view_width - fdc
-                    : col >= fdc + (wp != cmdwin_win ? 0 : 1))
+                    : col >= fdc)
                 && (flags & MOUSE_MAY_STOP_VIS)))) {
       end_visual_mode();
       redraw_curbuf_later(UPD_INVERTED);  // delete the inversion
-    }
-    if (cmdwin_type != 0 && wp != cmdwin_win) {
-      // A click outside the command-line window: Use modeless
-      // selection if possible.  Allow dragging the status lines.
-      sep_line_offset = 0;
-      row = 0;
-      col += wp->w_wincol;
-      wp = cmdwin_win;
     }
     // Only change window focus when not clicking on or dragging the
     // status line.  Do change focus when releasing the mouse button
@@ -1631,13 +1682,8 @@ bool mouse_comp_pos(win_T *win, int *rowp, int *colp, linenr_T *lnump)
 
   while (row > 0) {
     // Don't include filler lines in "count"
-    if (win_may_fill(win)) {
-      row -= lnum == win->w_topline ? win->w_topfill
-                                    : win_get_fill(win, lnum);
-      count = plines_win_nofill(win, lnum, false);
-    } else {
-      count = plines_win(win, lnum, false);
-    }
+    int filler_lines = lnum == win->w_topline ? win->w_topfill : win_get_fill(win, lnum);
+    count = plines_win_nofill(win, lnum, false);
 
     if (win->w_skipcol > 0 && lnum == win->w_topline) {
       int width1 = win->w_view_width - win_col_off(win);
@@ -1657,7 +1703,7 @@ bool mouse_comp_pos(win_T *win, int *rowp, int *colp, linenr_T *lnump)
       }
     }
 
-    if (count > row) {
+    if (count + filler_lines > row) {
       break;            // Position is in this buffer line.
     }
 
@@ -1667,9 +1713,34 @@ bool mouse_comp_pos(win_T *win, int *rowp, int *colp, linenr_T *lnump)
       retval = true;
       break;                    // past end of file
     }
-    row -= count;
+    row -= count + filler_lines;
     lnum++;
   }
+
+  int virt_below = 0;
+  int virt_lines = decor_virt_lines(win, lnum - 1, lnum, &virt_below, NULL, true);
+  int diff_fill = diff_check_fill(win, lnum);
+  int skip_fill = lnum == win->w_topline ? virt_lines + diff_fill - win->w_topfill : 0;
+
+  // Compute v:virt/lnum as it was when the statuscolmn was drawn. Used to fetch
+  // the click definition for this row from w_statuscol_click_defs, and so that
+  // it is available in 'statuscolumn' click handlers.
+  int virtnum = row - (virt_lines + diff_fill - skip_fill);
+  if (row < virt_below - skip_fill) {
+    // Clicking a "below" virtual line should interact with the line above,
+    // rather than the next line to which it is attached in the decor/draw sense.
+    lnum--;
+    int virt_below_prev = 0;
+    int virt_lines_prev = decor_virt_lines(win, lnum - 1, lnum, &virt_below_prev, NULL, true);
+    int diff_fill_prev = diff_check_fill(win, lnum - 1);
+    virtnum = -row - 1 - virt_lines_prev - diff_fill_prev + virt_below_prev;
+  } else if (row < virt_lines + diff_fill - skip_fill) {
+    virtnum = -row;
+  }
+  set_vim_var_nr(VV_LNUM, lnum);
+  set_vim_var_nr(VV_VIRTNUM, virtnum);
+
+  row -= virt_lines + diff_fill - skip_fill;
 
   // Mouse row reached, adjust lnum for concealed lines.
   while (lnum < win->w_buffer->b_ml.ml_line_count

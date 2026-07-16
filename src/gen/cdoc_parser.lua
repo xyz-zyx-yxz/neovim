@@ -175,7 +175,6 @@ local function process_proto(item, state)
     'remote_only',
     'lua_only',
     'textlock',
-    'textlock_allow_cmdwin',
   }) do
     if item[a] then
       cur_obj.attrs = cur_obj.attrs or {}
@@ -191,6 +190,17 @@ local function process_proto(item, state)
     local p = cur_obj.params[i]
     if p.name == 'channel_id' or vim.tbl_contains({ 'lstate', 'arena', 'error' }, p.type) then
       table.remove(cur_obj.params, i)
+    end
+  end
+
+  -- HACK: Mark optional params (:help api-contract) with "?" so docs render them as optional.
+  if c_grammar.opts_index(item.parameters) then
+    local optional = false
+    for _, p in ipairs(cur_obj.params) do
+      optional = optional or p.name == 'opts'
+      if optional and not p.type:match('%?$') then
+        p.type = p.type .. '?'
+      end
     end
   end
 end

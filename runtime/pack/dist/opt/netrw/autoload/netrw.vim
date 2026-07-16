@@ -1,7 +1,7 @@
 " Creator:    Charles E Campbell
 " Previous Maintainer: Luca Saccarola <github.e41mv@aleeas.com>
 " Maintainer: This runtime file is looking for a new maintainer.
-" Last Change: 2026 May 28
+" Last Change: 2026 Jul 01
 " Copyright:  Copyright (C) 2016 Charles E. Campbell {{{1
 "             Permission is hereby granted to use and distribute this code,
 "             with or without modifications, provided that this copyright
@@ -418,7 +418,7 @@ endif
 "                == 6: Texplore
 function netrw#Explore(indx,dosplit,style,...)
   if !exists("b:netrw_curdir")
-    let b:netrw_curdir= getcwd()
+    let b:netrw_curdir= netrw#fs#Cwd(0)
   endif
 
   " record current file for Rexplore's benefit
@@ -525,6 +525,10 @@ function netrw#Explore(indx,dosplit,style,...)
     call s:NetrwClearExplore()
     return
   endif
+  " Win32: Use forward slashes
+  if !g:netrw_cygwin && has("win32")
+    let dirname= substitute(dirname,'\','/','g')
+  endif
 
   if dirname =~ '\.\./\=$'
     let dirname= simplify(fnamemodify(dirname,':p:h'))
@@ -568,14 +572,11 @@ function netrw#Explore(indx,dosplit,style,...)
 
   if starpat == 0 && a:indx >= 0
     " [Explore Hexplore Vexplore Sexplore] [dirname]
-    if dirname == ""
-      let dirname= curfiledir
-    endif
     if dirname =~# '^scp://' || dirname =~ '^ftp://'
       call netrw#Nread(2,dirname)
     else
       if dirname == ""
-        let dirname= getcwd()
+        let dirname= netrw#fs#Cwd(0)
       elseif has("win32") && !g:netrw_cygwin
         " Windows : check for a drive specifier, or else for a remote share name ('\\Foo' or '//Foo',
         " depending on whether backslashes have been converted to forward slashes by earlier code).
@@ -3083,7 +3084,7 @@ function s:NetrwBrowse(islocal,dirname)
     elseif !a:islocal && dirname !~ '[\/]$' && dirname !~ '^"'
         " s:NetrwBrowse :  remote regular file handler {{{3
         if bufname(dirname) != ""
-            exe "NetrwKeepj b ".bufname(dirname)
+            exe "NetrwKeepj b ".fnameescape(bufname(dirname))
         else
             " attempt transfer of remote regular file
 
@@ -3861,7 +3862,7 @@ function s:NetrwBrowseChgDir(islocal, newdir, cursor, ...)
     endif
 
     " set up o/s-dependent directory recognition pattern
-    let dirpat = has("amiga") ? '[\/:]$' : '[\/]$'
+    let dirpat = has("amiga") || has('win32') ? '[\/:]$' : '/$'
 
     if newdir !~ dirpat && !(a:islocal && isdirectory(s:NetrwFile(netrw#fs#ComposePath(dirname, newdir))))
         " ------------------------------
@@ -4987,7 +4988,7 @@ function s:NetrwMaps(islocal)
             nno  <buffer> <silent>              <Plug>NetrwSLeftmouse   :exec "norm! \<lt>leftmouse>"<bar>call <SID>NetrwSLeftmouse(1)<cr>
             nno  <buffer> <silent>              <Plug>NetrwSLeftdrag    :exec "norm! \<lt>leftmouse>"<bar>call <SID>NetrwSLeftdrag(1)<cr>
             nmap <buffer> <silent>              <Plug>Netrw2Leftmouse   -
-                exe 'nnoremap <buffer> <silent> <rightmouse>  :exec "norm! \<lt>leftmouse>"<bar>call <SID>NetrwLocalRm("'.mapsafecurdir.'")<cr>'
+            exe 'nnoremap <buffer> <silent> <rightmouse>  :exec "norm! \<lt>leftmouse>"<bar>call <SID>NetrwLocalRm("'.mapsafecurdir.'")<cr>'
             exe 'vnoremap <buffer> <silent> <rightmouse>  :exec "norm! \<lt>leftmouse>"<bar>call <SID>NetrwLocalRm("'.mapsafecurdir.'")<cr>'
         endif
         exe 'nnoremap <buffer> <silent> <nowait> <del>       :call <SID>NetrwLocalRm("'.mapsafecurdir.'")<cr>'
@@ -5176,7 +5177,7 @@ endfunction
 "    s:netrwmarkfilelist_#  -- holds list of marked files in current-buffer's directory (#==bufnr())
 "
 "  Creates a marked file match string
-"    s:netrwmarfilemtch_#   -- used with 2match to display marked files
+"    s:netrwmarkfilemtch_#   -- used with 2match to display marked files
 "
 "  Creates a buffer version of islocal
 "    b:netrw_islocal
@@ -5188,23 +5189,21 @@ function s:NetrwMarkFile(islocal,fname)
     endif
     let curdir = s:NetrwGetCurdir(a:islocal)
 
-    let ykeep   = @@
-    let curbufnr= bufnr("%")
-    let leader= '\%(^\|\s\)\zs'
-    if a:fname =~ '\a$'
-        let trailer = '\>[@=|\/\*]\=\ze\%(  \|\t\|$\)'
-    else
-        let trailer = '[@=|\/\*]\=\ze\%(  \|\t\|$\)'
-    endif
+    let ykeep    = @@
+    let curbufnr = bufnr("%")
+    let leader   = '\%(^\|\s\)\zs'
+    let word_boundary_trailer = '\>[@=|\/\*]\=\ze\%(  \|\t\|$\)'
+    let fallback_trailer      = '[@=|\/\*]\=\ze\%(  \|\t\|$\)'
+    let trailer = (a:fname =~ '\a$') ? word_boundary_trailer : fallback_trailer
 
     if exists("s:netrwmarkfilelist_".curbufnr)
         " markfile list pre-exists
-        let b:netrw_islocal= a:islocal
+        let b:netrw_islocal = a:islocal
 
         if index(s:netrwmarkfilelist_{curbufnr},a:fname) == -1
             " append filename to buffer's markfilelist
-            call add(s:netrwmarkfilelist_{curbufnr},a:fname)
-            let s:netrwmarkfilemtch_{curbufnr}= s:netrwmarkfilemtch_{curbufnr}.'\|'.leader.escape(a:fname,g:netrw_markfileesc).trailer
+            call add(s:netrwmarkfilelist_{curbufnr},substitute(a:fname,'[|@]$','',''))
+            let s:netrwmarkfilemtch_{curbufnr} = s:netrwmarkfilemtch_{curbufnr}.'\|'.leader.escape(a:fname,g:netrw_markfileesc).trailer
 
         else
             " remove filename from buffer's markfilelist
@@ -5214,35 +5213,34 @@ function s:NetrwMarkFile(islocal,fname)
                 call s:NetrwUnmarkList(curbufnr,curdir)
             else
                 " rebuild match list to display markings correctly
-                let s:netrwmarkfilemtch_{curbufnr}= ""
-                let first                         = 1
+                let s:netrwmarkfilemtch_{curbufnr} = ""
+                let first = 1
                 for fname in s:netrwmarkfilelist_{curbufnr}
+                    let curtrailer = (fname =~ '\a$') ? word_boundary_trailer : fallback_trailer
+
+                    let match_str = leader.escape(fname, g:netrw_markfileesc).curtrailer
                     if first
-                        let s:netrwmarkfilemtch_{curbufnr}= s:netrwmarkfilemtch_{curbufnr}.leader.escape(fname,g:netrw_markfileesc).trailer
+                        let s:netrwmarkfilemtch_{curbufnr} = match_str
                     else
-                        let s:netrwmarkfilemtch_{curbufnr}= s:netrwmarkfilemtch_{curbufnr}.'\|'.leader.escape(fname,g:netrw_markfileesc).trailer
+                        let s:netrwmarkfilemtch_{curbufnr} = s:netrwmarkfilemtch_{curbufnr}.'\|'.match_str
                     endif
-                    let first= 0
+                    let first = 0
                 endfor
             endif
         endif
 
     else
         " initialize new markfilelist
-        let s:netrwmarkfilelist_{curbufnr}= []
+        let s:netrwmarkfilelist_{curbufnr} = []
         call add(s:netrwmarkfilelist_{curbufnr},substitute(a:fname,'[|@]$','',''))
 
         " build initial markfile matching pattern
-        if a:fname =~ '/$'
-            let s:netrwmarkfilemtch_{curbufnr}= leader.escape(a:fname,g:netrw_markfileesc)
-        else
-            let s:netrwmarkfilemtch_{curbufnr}= leader.escape(a:fname,g:netrw_markfileesc).trailer
-        endif
+        let s:netrwmarkfilemtch_{curbufnr} = leader.escape(a:fname,g:netrw_markfileesc).trailer
     endif
 
     " handle global markfilelist
     if exists("s:netrwmarkfilelist")
-        let dname= netrw#fs#ComposePath(b:netrw_curdir,a:fname)
+        let dname = netrw#fs#ComposePath(b:netrw_curdir,a:fname)
         if index(s:netrwmarkfilelist,dname) == -1
             " append new filename to global markfilelist
             call add(s:netrwmarkfilelist,netrw#fs#ComposePath(b:netrw_curdir,a:fname))
@@ -5255,7 +5253,7 @@ function s:NetrwMarkFile(islocal,fname)
         endif
     else
         " initialize new global-directory markfilelist
-        let s:netrwmarkfilelist= []
+        let s:netrwmarkfilelist = []
         call add(s:netrwmarkfilelist,netrw#fs#ComposePath(b:netrw_curdir,a:fname))
     endif
 
@@ -8686,7 +8684,15 @@ function s:NetrwLocalRename(path) range
             endif
 
             NetrwKeepj norm! 0
+            if exists('+shellslash') && !&ssl
+                let reset_ssl = 1
+                set ssl
+            endif
+            " Consistently use / as directory separator
             let oldname= netrw#fs#ComposePath(a:path,curword)
+            if reset_ssl
+                set nossl
+            endif
 
             call inputsave()
             let newname= input("Moving ".oldname." to : ",substitute(oldname,'/*$','','e'))
@@ -8807,7 +8813,7 @@ function s:NetrwLocalRmFile(path, fname, all)
             call netrw#msg#Notify('ERROR', printf("unable to delete <%s>!", rmfile))
         else
             " Remove file only if there are no pending changes
-            execute printf('silent! bwipeout %s', rmfile)
+            execute printf('silent! bwipeout %s', fnameescape(rmfile))
         endif
 
     elseif dir && (all || empty(ok))

@@ -68,6 +68,7 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/charset.h"
 #include "nvim/cmdexpand.h"
+#include "nvim/context.h"
 #include "nvim/decoration.h"
 #include "nvim/decoration_defs.h"
 #include "nvim/decoration_provider.h"
@@ -79,7 +80,6 @@
 #include "nvim/ex_getln.h"
 #include "nvim/fold.h"
 #include "nvim/fold_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
@@ -87,6 +87,7 @@
 #include "nvim/highlight.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/highlight_group.h"
+#include "nvim/input.h"
 #include "nvim/insexpand.h"
 #include "nvim/marktree_defs.h"
 #include "nvim/match.h"
@@ -465,6 +466,14 @@ int update_screen(void)
     return FAIL;
   }
 
+  // Restore actual curwin before redrawing.
+  win_T *save_curwin = ctx_saved_curwin();
+  win_T *restore_curwin = save_curwin != NULL ? curwin : NULL;
+  if (save_curwin != NULL) {
+    curwin = save_curwin;
+    curbuf = curwin->w_buffer;
+  }
+
   int type = must_redraw;
 
   // must_redraw is reset here, so that when we run into some weird
@@ -740,6 +749,13 @@ int update_screen(void)
   if (!ui_has(kUICmdline)) {
     cmdline_was_last_drawn = false;
   }
+
+  // Restore temporary autocmd curwin.
+  if (restore_curwin != NULL) {
+    curwin = restore_curwin;
+    curbuf = curwin->w_buffer;
+  }
+
   return OK;
 }
 

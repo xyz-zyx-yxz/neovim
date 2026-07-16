@@ -1184,155 +1184,6 @@ describe('folded lines', function()
       end
     end)
 
-    it('in cmdline window', function()
-      feed_command('set foldmethod=manual foldcolumn=1')
-      feed_command('let x = 1')
-      feed_command('/alpha')
-      feed_command('/omega')
-
-      feed('<cr>q:')
-      if multigrid then
-        screen:expect([[
-        ## grid 1
-          [2:---------------------------------------------]|
-          {2:[No Name]                                    }|
-          [4:---------------------------------------------]|*4
-          {3:[Command Line]                               }|
-          [3:---------------------------------------------]|
-        ## grid 2
-          {7: }                                            |
-        ## grid 3
-          :                                            |
-        ## grid 4
-          {1::}{7: }set foldmethod=manual foldcolumn=1         |
-          {1::}{7: }let x = 1                                  |
-          {1::}{7: }^                                           |
-          {1:~                                            }|
-        ]])
-      else
-        screen:expect([[
-          {7: }                                            |
-          {2:[No Name]                                    }|
-          {1::}{7: }set foldmethod=manual foldcolumn=1         |
-          {1::}{7: }let x = 1                                  |
-          {1::}{7: }^                                           |
-          {1:~                                            }|
-          {3:[Command Line]                               }|
-          :                                            |
-        ]])
-      end
-
-      feed('kzfk')
-      if multigrid then
-        screen:expect([[
-        ## grid 1
-          [2:---------------------------------------------]|
-          {2:[No Name]                                    }|
-          [4:---------------------------------------------]|*4
-          {3:[Command Line]                               }|
-          [3:---------------------------------------------]|
-        ## grid 2
-          {7: }                                            |
-        ## grid 3
-          :                                            |
-        ## grid 4
-          {1::}{7:+}{13:^+--  2 lines: set foldmethod=manual foldcol}|
-          {1::}{7: }                                           |
-          {1:~                                            }|*2
-        ]])
-      else
-        screen:expect([[
-          {7: }                                            |
-          {2:[No Name]                                    }|
-          {1::}{7:+}{13:^+--  2 lines: set foldmethod=manual foldcol}|
-          {1::}{7: }                                           |
-          {1:~                                            }|*2
-          {3:[Command Line]                               }|
-          :                                            |
-        ]])
-      end
-
-      feed('<cr>')
-      if multigrid then
-        screen:expect([[
-        ## grid 1
-          [2:---------------------------------------------]|*7
-          [3:---------------------------------------------]|
-        ## grid 2
-          {7: }^                                            |
-          {1:~                                            }|*6
-        ## grid 3
-          :                                            |
-        ]])
-      else
-        screen:expect([[
-          {7: }^                                            |
-          {1:~                                            }|*6
-          :                                            |
-        ]])
-      end
-
-      feed('/<c-f>')
-      if multigrid then
-        screen:expect([[
-        ## grid 1
-          [2:---------------------------------------------]|
-          {2:[No Name]                                    }|
-          [5:---------------------------------------------]|*4
-          {3:[Command Line]                               }|
-          [3:---------------------------------------------]|
-        ## grid 2
-          {7: }                                            |
-        ## grid 3
-          /                                            |
-        ## grid 5
-          {1:/}{7: }alpha                                      |
-          {1:/}{7: }{10:omega}                                      |
-          {1:/}{7: }^                                           |
-          {1:~                                            }|
-        ]])
-      else
-        screen:expect([[
-          {7: }                                            |
-          {2:[No Name]                                    }|
-          {1:/}{7: }alpha                                      |
-          {1:/}{7: }{10:omega}                                      |
-          {1:/}{7: }^                                           |
-          {1:~                                            }|
-          {3:[Command Line]                               }|
-          /                                            |
-        ]])
-      end
-
-      feed('ggzfG')
-      if multigrid then
-        screen:expect([[
-        ## grid 1
-          [2:---------------------------------------------]|
-          {2:[No Name]                                    }|
-          [5:---------------------------------------------]|*4
-          {3:[Command Line]                               }|
-          [3:---------------------------------------------]|
-        ## grid 2
-          {7: }                                            |
-        ## grid 3
-          /                                            |
-        ## grid 5
-          {1:/}{7:+}{13:^+--  3 lines: alpha························}|
-          {1:~                                            }|*3
-        ]])
-      else
-        screen:expect([[
-          {7: }                                            |
-          {2:[No Name]                                    }|
-          {1:/}{7:+}{13:^+--  3 lines: alpha························}|
-          {1:~                                            }|*3
-          {3:[Command Line]                               }|
-          /                                            |
-        ]])
-      end
-    end)
-
     it('foldcolumn autoresize', function()
       fn.setline(1, 'line 1')
       fn.setline(2, 'line 2')
@@ -2304,6 +2155,10 @@ describe('folded lines', function()
                                                        |
         ]])
       end
+
+      -- `foldcolumn` in `statuscolumn` should be identical
+      command('set statuscolumn=%C')
+      screen:expect_unchanged()
     end)
 
     it('foldcolumn is not interrupted when virt_lines are inside a fold', function()
@@ -2353,6 +2208,129 @@ describe('folded lines', function()
                                                        |
         ]])
       end
+
+      command('set statuscolumn=%C')
+      screen:expect_unchanged()
+    end)
+
+    it('foldcolumn for a virt_line above a nested fold shows correct fold level', function()
+      fn.setline(1, 'line 1')
+      fn.setline(2, 'line 2')
+      fn.setline(3, 'line 3')
+      fn.setline(4, 'line 4')
+
+      local ns = api.nvim_create_namespace('ns')
+      api.nvim_buf_set_extmark(0, ns, 1, 0, { virt_lines = { { { 'below line 2', '' } } } })
+      api.nvim_buf_set_extmark(
+        0,
+        ns,
+        2,
+        0,
+        { virt_lines_above = true, virt_lines = { { { 'above line 3', '' } } } }
+      )
+
+      command('1,4fold | 1,4foldopen')
+      command('3,4fold | 3,4foldopen ')
+      command('set foldcolumn=1')
+      if multigrid then
+        screen:expect([[
+        ## grid 1
+          [2:---------------------------------------------]|*7
+          [3:---------------------------------------------]|
+        ## grid 2
+          {7:-}^line 1                                      |
+          {7:│}line 2                                      |
+          {7:│}below line 2                                |
+          {7:│}above line 3                                |
+          {7:-}line 3                                      |
+          {7:2}line 4                                      |
+          {1:~                                            }|
+        ## grid 3
+                                                       |
+        ]])
+      else
+        screen:expect([[
+          {7:-}^line 1                                      |
+          {7:│}line 2                                      |
+          {7:│}below line 2                                |
+          {7:│}above line 3                                |
+          {7:-}line 3                                      |
+          {7:2}line 4                                      |
+          {1:~                                            }|
+                                                       |
+        ]])
+      end
+
+      command('set statuscolumn=%C')
+      screen:expect_unchanged()
+      command('set statuscolumn=')
+
+      command('set foldcolumn=2')
+      if multigrid then
+        screen:expect([[
+        ## grid 1
+          [2:---------------------------------------------]|*7
+          [3:---------------------------------------------]|
+        ## grid 2
+          {7:- }^line 1                                     |
+          {7:│ }line 2                                     |
+          {7:│ }below line 2                               |
+          {7:│ }above line 3                               |
+          {7:│-}line 3                                     |
+          {7:││}line 4                                     |
+          {1:~                                            }|
+        ## grid 3
+                                                       |
+        ]])
+      else
+        screen:expect([[
+          {7:- }^line 1                                     |
+          {7:│ }line 2                                     |
+          {7:│ }below line 2                               |
+          {7:│ }above line 3                               |
+          {7:│-}line 3                                     |
+          {7:││}line 4                                     |
+          {1:~                                            }|
+                                                       |
+        ]])
+      end
+
+      command('set statuscolumn=%C')
+      screen:expect_unchanged()
+      command('set statuscolumn=')
+
+      command('2,4fold | 2,4foldopen')
+      if multigrid then
+        screen:expect([[
+        ## grid 1
+          [2:---------------------------------------------]|*7
+          [3:---------------------------------------------]|
+        ## grid 2
+          {7:- }^line 1                                     |
+          {7:│-}line 2                                     |
+          {7:││}below line 2                               |
+          {7:││}above line 3                               |
+          {7:2-}line 3                                     |
+          {7:23}line 4                                     |
+          {1:~                                            }|
+        ## grid 3
+                                                       |
+        ]])
+      else
+        screen:expect([[
+          {7:- }^line 1                                     |
+          {7:│-}line 2                                     |
+          {7:││}below line 2                               |
+          {7:││}above line 3                               |
+          {7:2-}line 3                                     |
+          {7:23}line 4                                     |
+          {1:~                                            }|
+                                                       |
+        ]])
+      end
+
+      command('set statuscolumn=%C')
+      screen:expect_unchanged()
     end)
 
     it('Folded and Visual highlights are combined #19691', function()

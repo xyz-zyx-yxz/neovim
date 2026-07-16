@@ -496,18 +496,18 @@ function vim.fn.browse(save, title, initdir, default) end
 --- @return 0|1
 function vim.fn.browsedir(title, initdir) end
 
---- Add a buffer to the buffer list with name {name} (must be a
---- String).
---- If a buffer for file {name} already exists, return that buffer
---- number.  Otherwise return the buffer number of the newly
---- created buffer.  When {name} is an empty string then a new
---- buffer is always created.
---- The buffer will not have 'buflisted' set and not be loaded
---- yet.  To add some text to the buffer use this: >vim
----   let bufnr = bufadd('someName')
----   call bufload(bufnr)
----   call setbufline(bufnr, 1, ['some', 'text'])
---- <Returns 0 on error.
+--- Adds buffer {name} to the |buffer-list| literally: no special
+--- chars or expansion are applied (including "~"). Returns the
+--- new (or existing matching) buffer number, or 0 on error.
+---
+--- The buffer is not loaded and 'buflisted' is not set. When
+--- {name} is an empty string, a new buffer is always created.
+---
+--- Example (Lua): >lua
+---   local buf = vim.fn.bufadd(vim.fs.normalize('someName'))
+---   -- Set 'buflisted'; trigger BufReadPre/BufReadPost/FileType.
+---   vim.api.nvim_buf_call(buf, vim.cmd.edit)
+--- <
 ---
 --- @param name string
 --- @return integer
@@ -605,7 +605,9 @@ function vim.fn.bufloaded(buf) end
 ---
 --- The result is the name of a buffer.  Mostly as it is displayed
 --- by the `:ls` command, but not using special names such as
---- "[No Name]".
+--- "[No Name]".  If the buffer represents a directory, the name
+--- ends with a path separator, unless it was changed by |:file| or
+--- |nvim_buf_set_name()|.
 --- If {buf} is omitted the current buffer is used.
 --- If {buf} is a Number, that buffer number's name is given.
 --- Number zero is the alternate buffer for the current window.
@@ -1083,6 +1085,15 @@ function vim.fn.col(expr, winid) end
 --- The match can be selected with CTRL-N and CTRL-P as usual with
 --- Insert mode completion.  The popup menu will appear if
 --- specified, see |ins-completion-menu|.
+--- Unlike with other |ins-completion| modes, the CTRL-N and
+--- CTRL-P keys can be mapped while this completion is active.
+--- For example, to make CTRL-N move the selection without
+--- inserting the match: >vim
+---
+--- inoremap <expr> <C-N> complete_info().mode ==# 'eval'
+---       \ ? '<Down>' : '<C-N>'
+--- <
+---
 --- Example: >vim
 ---
 --- inoremap <F5> <C-R>=ListMonths()<CR>
@@ -1321,45 +1332,6 @@ function vim.fn.cosh(expr) end
 --- @param start? integer
 --- @return integer
 function vim.fn.count(comp, expr, ic, start) end
-
---- Returns a |Dictionary| representing the |context| at {index}
---- from the top of the |context-stack| (see |context-dict|).
---- If {index} is not given, it is assumed to be 0 (i.e.: top).
----
---- @param index? integer
---- @return table
-function vim.fn.ctxget(index) end
-
---- Pops and restores the |context| at the top of the
---- |context-stack|.
----
---- @return any
-function vim.fn.ctxpop() end
-
---- Pushes the current editor state (|context|) on the
---- |context-stack|.
---- If {types} is given and is a |List| of |String|s, it specifies
---- which |context-types| to include in the pushed context.
---- Otherwise, all context types are included.
----
---- @param types? string[]
---- @return any
-function vim.fn.ctxpush(types) end
-
---- Sets the |context| at {index} from the top of the
---- |context-stack| to that represented by {context}.
---- {context} is a Dictionary with context data (|context-dict|).
---- If {index} is not given, it is assumed to be 0 (i.e.: top).
----
---- @param context table
---- @param index? integer
---- @return integer
-function vim.fn.ctxset(context, index) end
-
---- Returns the size of the |context-stack|.
----
---- @return any
-function vim.fn.ctxsize() end
 
 --- @param lnum integer|string
 --- @param col? integer
@@ -2409,12 +2381,14 @@ function vim.fn.floor(expr) end
 --- @return any
 function vim.fn.fmod(expr1, expr2) end
 
---- Lua: Prefer |nvim_cmd()| or |vim.cmd()| with structured arguments to avoid Ex filename escaping.
+--- Escapes {filepath} for use as a command argument.
 ---
---- Escape {string} for use as file name command argument.  All
---- characters that have a special meaning, such as `'%'` and `'|'`
---- are escaped with a backslash. For most systems the characters
---- escaped are: >
+--- (Note: To open a literal filepath programmatically use
+--- `bufadd(vim.fs.normalize(…))`, see |open-file|.)
+---
+--- All characters that have a special meaning, such as `'%'` and
+--- `'|'` are escaped with a backslash. For most systems the
+--- characters escaped are: >
 ---   \t\n *?[{`$\\%#'\"|!<
 --- <For systems where a backslash appears in a filename, it
 --- depends on the value of 'isfname'. A leading '+' and '>' is
@@ -2428,9 +2402,9 @@ function vim.fn.fmod(expr1, expr2) end
 ---   edit \+some\ str\%nge\|name
 --- <
 ---
---- @param string string
+--- @param filepath string
 --- @return string
-function vim.fn.fnameescape(string) end
+function vim.fn.fnameescape(filepath) end
 
 --- Lua: Prefer |vim.fs.dirname()|, |vim.fs.basename()|, |vim.fs.abspath()|, and |vim.fs.normalize()| for common path modifiers; modifier coverage differs.
 ---
@@ -3064,12 +3038,11 @@ function vim.fn.getchar(expr, opts) end
 --- @return integer
 function vim.fn.getcharmod() end
 
---- Get the position for String {expr}.  Same as |getpos()| but the
---- column number in the returned List is a character index
---- instead of a byte index.
---- If |getpos()| returns a very large column number, equal to
---- |v:maxcol|, then getcharpos() will return the character index
---- of the last character.
+--- Same as |getpos()|, except the column-number is
+--- character-indexed (UTF-8) instead of byte-indexed.
+---
+--- If |getpos()| returns |v:maxcol|, then getcharpos() returns
+--- the index of the last character.
 ---
 --- Example:
 --- With the cursor on '세' in line 5 with text "여보세요": >vim
@@ -3566,7 +3539,8 @@ function vim.fn.getloclist(nr, what) end
 --- If the optional {buf} argument is specified, returns the
 --- local marks defined in buffer {buf}.  For the use of {buf},
 --- see |bufname()|.  If {buf} is invalid, an empty list is
---- returned.
+--- returned.  For a |prompt-buffer| the result includes the
+--- |':| mark.
 ---
 --- Each item in the returned List is a |Dict| with the following:
 ---     mark   name of the mark prefixed by "'"
@@ -5237,7 +5211,11 @@ function vim.fn.jobsend(...) end
 ---   pty:        (boolean) Connect the job to a new pseudo
 ---         terminal, and its streams to the master file
 ---         descriptor. `on_stdout` receives all output,
----         `on_stderr` is ignored. |terminal-start|
+---         `on_stderr` is ignored. Note: if the child writes
+---         a query (DA1, OSC, …), it may hang or timeout waiting
+---         for a response! To avoid that, `on_stdout` should
+---         reply via |nvim_chan_send()| on the child's stdin.
+---         See |terminal-start| |terminal-concepts|
 ---   rpc:        (boolean) Use |msgpack-rpc| to communicate with
 ---         the job over stdio. Then `on_stdout` is ignored,
 ---         but `on_stderr` can still be used.
@@ -5248,11 +5226,12 @@ function vim.fn.jobsend(...) end
 ---   stdin:      (string) Either "pipe" (default) to connect the
 ---         job's stdin to a channel or "null" to disconnect
 ---         stdin.
----   term:      (boolean) Spawns {cmd} in a new pseudo-terminal session
----           connected to the current (unmodified) buffer. Implies "pty".
----           Default "height" and "width" are set to the current window
----           dimensions. |jobstart()|. Defaults $TERM to "xterm-256color".
----   width:      (number) Width of the `pty` terminal.
+---   term:       (boolean) Spawns {cmd} in a new pseudo-terminal
+---         session connected to the current (unmodified) buffer.
+---         Implies "pty". Defaults "height" and "width" to the
+---         current window dimensions. Defaults $TERM to
+---         "xterm-256color".
+---   width:      (number) Width of the `pty` pseudo-terminal.
 ---
 --- {opts} is passed as |self| dictionary to the callback; the
 --- caller may set other keys to pass application-specific data.
@@ -6179,15 +6158,15 @@ function vim.fn.matchend(expr, pat, start, count) end
 ---     use for fuzzy matching.
 ---
 --- {str} is treated as a literal string and regular expression
---- matching is NOT supported.  The maximum supported {str} length
---- is 256.
+--- matching is NOT supported.  Only the first 1024 characters of
+--- {str} and of each item in {list} are used for matching;
+--- characters beyond that are ignored.
 ---
 --- When {str} has multiple words each separated by white space,
 --- then the list of strings that have all the words is returned.
 ---
 --- If there are no matching strings or there is an error, then an
---- empty list is returned.  If length of {str} is greater than
---- 256, then returns an empty list.
+--- empty list is returned.
 ---
 --- When {limit} is given, matchfuzzy() will find up to this
 --- number of matches in {list} and return them in sorted order.
@@ -6504,7 +6483,7 @@ function vim.fn.menu_info(name, mode) end
 --- @return number
 function vim.fn.min(expr) end
 
---- Lua: Prefer |uv.fs_mkdir()| for simple directory creation; `"p"`, `"D"`, `"R"`, and return semantics differ.
+--- Lua: Prefer |vim.fs.mkdir()|; `"D"`, `"R"`, and return semantics differ.
 ---
 --- Create directory {name}.
 ---
@@ -8346,7 +8325,7 @@ function vim.fn.serverlist(opts) end
 ---
 --- <Example named pipe: >vim
 ---   if has('win32')
----     echo serverstart('\\.\pipe\nvim-pipe-1234')
+---     echo serverstart('//./pipe/nvim-pipe-1234')
 ---   else
 ---     echo serverstart('nvim.sock')
 ---   endif
@@ -8402,14 +8381,13 @@ function vim.fn.setbufline(buf, lnum, text) end
 
 --- Lua: Prefer |nvim_buf_set_var()| or |vim.b| after resolving {buf} to a bufnr; option names use |nvim_set_option_value()|.
 ---
---- Set option or local variable {varname} in buffer {buf} to
---- {val}.
---- This also works for a global or local window option, but it
---- doesn't work for a global or local window variable.
---- For a local window option the global value is unchanged.
+--- Set option or local variable {varname} (string, without "b:")
+--- in buffer {buf} to {val}. Also works for a global or
+--- window-local option (not variable). When targeting
+--- a window-local option, the global option is unchanged.
+---
 --- For the use of {buf}, see |bufname()| above.
---- The {varname} argument is a string.
---- Note that the variable name without "b:" must be used.
+---
 --- Examples: >vim
 ---   call setbufvar(1, "&mod", 1)
 ---   call setbufvar("todo", "myvar", "foobar")

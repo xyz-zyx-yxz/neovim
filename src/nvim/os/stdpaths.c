@@ -7,6 +7,7 @@
 #include "nvim/fileio.h"
 #include "nvim/globals.h"
 #include "nvim/memory.h"
+#include "nvim/os/fs.h"
 #include "nvim/os/os.h"
 #include "nvim/os/os_defs.h"
 #include "nvim/os/stdpaths_defs.h"
@@ -74,6 +75,8 @@ const char *get_appname(bool namelike)
     xstrlcpy(NameBuff, "nvim", sizeof(NameBuff));
   }
 
+  TO_SLASH(NameBuff);
+
   if (namelike) {
     // Appname may be a relative path, replace slashes to make it name-like.
     memchrsub(NameBuff, '/', '-', sizeof(NameBuff));
@@ -93,10 +96,6 @@ bool appname_is_valid(void)
       || strequal(appname, "\\")
       || strequal(appname, ".")
       || strequal(appname, "..")
-#ifdef BACKSLASH_IN_FILENAME
-      || strstr(appname, "\\..") != NULL
-      || strstr(appname, "..\\") != NULL
-#endif
       || strstr(appname, "/..") != NULL
       || strstr(appname, "../") != NULL) {
     return false;
@@ -160,6 +159,13 @@ char *stdpaths_get_xdg_var(const XDGVarType idx)
 #ifdef MSWIN
   if (env_val == NULL && xdg_defaults_env_vars[idx] != NULL) {
     env_val = os_getenv(xdg_defaults_env_vars[idx]);
+  }
+  if (env_val != NULL && idx == kXDGCacheHome) {
+    char *real_path = os_realpath(env_val, NULL, MAXPATHL);
+    if (real_path != NULL) {
+      xfree(env_val);
+      env_val = real_path;
+    }
   }
 #else
   if (env_val == NULL && os_env_exists(env, false)) {

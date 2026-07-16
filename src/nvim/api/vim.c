@@ -37,14 +37,14 @@
 #include "nvim/ex_docmd.h"
 #include "nvim/ex_eval.h"
 #include "nvim/fold.h"
-#include "nvim/getchar.h"
-#include "nvim/getchar_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/grid_defs.h"
 #include "nvim/highlight.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/highlight_group.h"
+#include "nvim/input.h"
+#include "nvim/input_defs.h"
 #include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/log.h"
@@ -695,12 +695,8 @@ void nvim_set_current_dir(String dir, Error *err)
     return;
   });
 
-  char string[MAXPATHL];
-  memcpy(string, dir.data, dir.size);
-  string[dir.size] = NUL;
-
   TRY_WRAP(err, {
-    changedir_func(string, kCdScopeGlobal);
+    changedir_func(dir.data, kCdScopeGlobal);
   });
 }
 
@@ -720,7 +716,7 @@ String nvim_get_current_line(Arena *arena, Error *err)
 /// @param[out] err Error details, if any
 void nvim_set_current_line(String line, Arena *arena, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+  FUNC_API_TEXTLOCK
 {
   buffer_set_line(curbuf->handle, curwin->w_cursor.lnum - 1, line, arena, err);
 }
@@ -730,7 +726,7 @@ void nvim_set_current_line(String line, Arena *arena, Error *err)
 /// @param[out] err Error details, if any
 void nvim_del_current_line(Arena *arena, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+  FUNC_API_TEXTLOCK
 {
   buffer_del_line(curbuf->handle, curwin->w_cursor.lnum - 1, arena, err);
 }
@@ -810,7 +806,7 @@ void nvim_set_vvar(String name, Object value, Error *err)
 ///
 /// Example:
 /// ```lua
-/// vim.api.nvim_echo({ { 'chunk1-line1\nchunk1-line2\n' }, { 'chunk2-line1' } }, true, {})
+/// vim.api.nvim_echo({ { 'chunk1-line1\nchunk1-line2\n' }, { 'chunk2-line1' } }, true)
 /// ```
 ///
 /// @param chunks List of `[text, hl_group]` pairs, where each is a `text` string highlighted by
@@ -1042,8 +1038,6 @@ void nvim_set_current_win(Window win, Error *err)
 ///                (always 'nomodified'). Also sets 'nomodeline' on the buffer.
 /// @param[out] err Error details, if any
 /// @return Buffer id, or 0 on error
-///
-/// @see buf_open_scratch
 Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
   FUNC_API_SINCE(6)
 {
@@ -1076,7 +1070,7 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
 
     // Only strictly needed for scratch, but could just as well be consistent
     // and do this now. Buffer is created NOW, not when it later first happens
-    // to reach a window or aucmd_prepbuf() ..
+    // to reach a window or ctx_switch() ..
     buf_copy_options(buf, BCO_ENTER | BCO_NOHELP);
 
     if (scratch) {
@@ -1120,12 +1114,14 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
 /// will be echoed directly by the terminal. This is useful to display
 /// ANSI terminal sequences returned as part of an RPC message, or similar.
 ///
-/// Note: to directly initiate the terminal using the right size, display the
-/// buffer in a configured window before calling this. For instance, for a
-/// floating display, first create an empty buffer using |nvim_create_buf()|,
-/// then display it using |nvim_open_win()|, and then  call this function.
-/// Then |nvim_chan_send()| can be called immediately to process sequences
-/// in a virtual terminal having the intended size.
+/// Note: |:ls| reports the buffer as "R" (running) until the channel is closed. |chanclose()|
+///
+/// Note: To initialize the terminal size, display the buffer in a window first. E.g. for a floating display,
+/// 1. Create an empty buffer using |nvim_create_buf()|.
+/// 2. Display it with |nvim_open_win()|.
+/// 3. Call nvim_open_term().
+/// 4. Then calling |nvim_chan_send()| will process sequences in a virtual terminal with the
+///    intended size (defined by the window width/height).
 ///
 /// Example: this `TermHl` command can be used to display and highlight raw ANSI termcodes, so you
 /// can use Nvim as a "scrollback pager" (for terminals like kitty): [ansi-colorize]()
@@ -1133,12 +1129,12 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
 ///
 /// ```lua
 /// vim.api.nvim_create_user_command('TermHl', function()
-///   vim.api.nvim_open_term(0, {})
+///   vim.api.nvim_open_term(0)
 /// end, { desc = 'Highlights ANSI termcodes in curbuf' })
 /// ```
 ///
-/// @param buf Buffer to use. Buffer contents (if any) will be written
-///               to the PTY.
+/// @param buf Buffer which displays the PTY output. The initial buffer contents (if any) will be
+///            written to the PTY.
 /// @param opts   Optional parameters.
 ///          - force_crlf: (boolean, default true) Convert "\n" to "\r\n".
 ///          - on_input: Lua callback for input sent, i e keypresses in terminal
@@ -1151,15 +1147,16 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
 /// @return Channel id, or 0 on error
 Integer nvim_open_term(Buffer buf, Dict(open_term) *opts, Error *err)
   FUNC_API_SINCE(7)
-  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+  FUNC_API_TEXTLOCK
 {
   buf_T *b = api_buf_ensure_loaded(buf, err);
   if (!b) {
     return 0;
   }
 
-  if (b == cmdwin_buf) {
-    api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
+  // Refuse to repurpose the cmdwin buffer.
+  if (bt_cmdwin(b)) {
+    api_set_error(err, kErrorTypeException, "%s", _(e_cmdwin));
     return 0;
   }
 
@@ -1374,7 +1371,7 @@ void nvim_set_current_tabpage(Tabpage tabpage, Error *err)
 Boolean nvim_paste(uint64_t channel_id, String data, Boolean crlf, Integer phase, Arena *arena,
                    Error *err)
   FUNC_API_SINCE(6)
-  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+  FUNC_API_TEXTLOCK
 {
   static bool cancelled = false;
 
@@ -1436,7 +1433,7 @@ theend:
 void nvim_put(ArrayOf(String) lines, String type, Boolean after, Boolean follow, Arena *arena,
               Error *err)
   FUNC_API_SINCE(6)
-  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+  FUNC_API_TEXTLOCK
 {
   yankreg_T reg[1] = { 0 };
   VALIDATE_S((prepare_yankreg_from_object(reg, type, lines.size)), "type", type.data, {
@@ -1566,7 +1563,7 @@ Object nvim_load_context(Dict dict, Error *err)
 
   ctx_from_dict(dict, &ctx, err);
   if (!ERROR_SET(err)) {
-    ctx_restore(&ctx, kCtxAll);
+    ctx_load(&ctx, kCtxAll);
   }
 
   ctx_free(&ctx);
@@ -1771,6 +1768,27 @@ void nvim__chan_set_detach(uint64_t channel_id, Boolean detach, Error *err)
   });
 
   chan->detach = (bool)detach;
+}
+
+/// Records the cmdwin scratchbuf and type, or clears both when type="" / buf=0. Internal use only.
+///
+/// @param type  ':', '/', '?' (first char only); empty to clear.
+/// @param buf   cmdwin buffer id, or 0 to clear.
+/// @param[out] err Error details, if any.
+void nvim__cmdwin_set(String type, Buffer buf, Error *err)
+  FUNC_API_SINCE(14)
+{
+  if (type.size == 0 || buf == 0) {
+    cmdwin_type = 0;
+    cmdwin_buf = NULL;
+    return;
+  }
+  buf_T *b = find_buffer_by_handle(buf, err);
+  if (ERROR_SET(err)) {
+    return;
+  }
+  cmdwin_type = (uint8_t)type.data[0];
+  cmdwin_buf = b;
 }
 
 /// Gets information about a channel.

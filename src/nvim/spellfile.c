@@ -890,7 +890,7 @@ static void tree_count_words(const uint8_t *byts, int byts_len, idx_T *idxs)
           n++;
           curi[depth]++;
         }
-      } else {
+      } else if (depth < MAXWLEN - 1) {
         // Normal char, go one level deeper to count the words.
         depth++;
         arridx[depth] = idxs[n];
@@ -1339,8 +1339,6 @@ static int read_sofo_section(FILE *fd, slang_T *slang)
   int cnt;
   int res;
 
-  slang->sl_sofo = true;
-
   // <sofofromlen> <sofofrom>
   char *from = read_cnt_string(fd, 2, &cnt);
   if (cnt < 0) {
@@ -1552,6 +1550,7 @@ static int set_sofo(slang_T *lp, const char *from, const char *to)
   ga_grow(gap, 256);
   memset(gap->ga_data, 0, sizeof(int *) * 256);
   gap->ga_len = 256;
+  lp->sl_sofo = true;
 
   // First count the number of items for each list.  Temporarily use
   // sl_sal_first[] for this.
@@ -1742,7 +1741,7 @@ static idx_T read_tree_node(FILE *fd, uint8_t *byts, idx_T *idxs, int maxidx, id
     return SP_TRUNCERROR;
   }
 
-  if (startidx + len >= maxidx) {
+  if (len >= maxidx - startidx) {
     return SP_FORMERROR;
   }
   byts[idx++] = (uint8_t)len;
@@ -5006,7 +5005,7 @@ static int sug_filltree(spellinfo_T *spin, slang_T *slang)
           n++;
           curi[depth]++;
         }
-      } else {
+      } else if (depth < MAXWLEN - 1) {
         // Normal char, go one level deeper.
         tword[depth++] = (char)(uint8_t)c;
         arridx[depth] = idxs[n];

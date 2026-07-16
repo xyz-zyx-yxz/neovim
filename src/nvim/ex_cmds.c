@@ -31,10 +31,10 @@
 #include "nvim/cmdhist.h"
 #include "nvim/cursor.h"
 #include "nvim/decoration.h"
+#include "nvim/dialog.h"
 #include "nvim/diff.h"
 #include "nvim/digraph.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/typval_defs.h"
@@ -49,7 +49,6 @@
 #include "nvim/extmark_defs.h"
 #include "nvim/fileio.h"
 #include "nvim/fold.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/help.h"
@@ -57,6 +56,7 @@
 #include "nvim/highlight_group.h"
 #include "nvim/indent.h"
 #include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/lua/executor.h"
 #include "nvim/macros_defs.h"
 #include "nvim/main.h"
@@ -1415,8 +1415,14 @@ static void do_filter(linenr_T line1, linenr_T line2, exarg_T *eap, char *cmd, b
       // Adjust '[ and '] (set by buf_write()).
       curwin->w_cursor.lnum = line1;
       del_lines(linecount, true);
-      curbuf->b_op_start.lnum -= linecount;             // adjust '[
-      curbuf->b_op_end.lnum -= linecount;               // adjust ']
+      if (read_linecount == 0) {
+        // no filter output: clamp '[ and '] to a valid line
+        curbuf->b_op_start.lnum = curbuf->b_op_end.lnum = MIN(line1, curbuf->b_ml.ml_line_count);
+        curbuf->b_op_start.col = curbuf->b_op_end.col = 0;
+      } else {
+        curbuf->b_op_start.lnum -= linecount;   // adjust '[
+        curbuf->b_op_end.lnum -= linecount;     // adjust ']
+      }
       write_lnum_adjust(-linecount);                    // adjust last line
                                                         // for next write
       foldUpdate(curwin, curbuf->b_op_start.lnum, curbuf->b_op_end.lnum);
@@ -2126,6 +2132,7 @@ void do_wqall(exarg_T *eap)
         && channel_job_running((uint64_t)buf->b_p_channel)) {
       no_write_message_buf(buf);
       error++;
+      continue;
     } else if (!bufIsChanged(buf) || bt_dontwrite(buf)) {
       continue;
     }
@@ -2547,20 +2554,6 @@ int do_ecmd(int fnum, char *ffname, char *sfname, exarg_T *eap, linenr_T newlnum
     // If the current buffer was empty and has no file name, curbuf
     // is returned by buflist_new(), nothing to do here.
     if (buf != curbuf) {
-      // Should only be possible to get here if the cmdwin is closed, or
-      // if it's opening and its buffer hasn't been set yet (the new
-      // buffer is for it).
-      assert(cmdwin_buf == NULL);
-
-      const int save_cmdwin_type = cmdwin_type;
-      win_T *const save_cmdwin_win = cmdwin_win;
-      win_T *const save_cmdwin_old_curwin = cmdwin_old_curwin;
-
-      // BufLeave applies to the old buffer.
-      cmdwin_type = 0;
-      cmdwin_win = NULL;
-      cmdwin_old_curwin = NULL;
-
       // Be careful: The autocommands may delete any buffer and change
       // the current buffer.
       // - If the buffer we are going to edit is deleted, give up.
@@ -2575,10 +2568,6 @@ int do_ecmd(int fnum, char *ffname, char *sfname, exarg_T *eap, linenr_T newlnum
       const bufref_T save_au_new_curbuf = au_new_curbuf;
       set_bufref(&au_new_curbuf, buf);
       apply_autocmds(EVENT_BUFLEAVE, NULL, NULL, false, curbuf);
-
-      cmdwin_type = save_cmdwin_type;
-      cmdwin_win = save_cmdwin_win;
-      cmdwin_old_curwin = save_cmdwin_old_curwin;
 
       if (!bufref_valid(&au_new_curbuf)) {
         // New buffer has been deleted.

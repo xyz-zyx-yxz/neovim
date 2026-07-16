@@ -53,26 +53,6 @@ local function repo_write_file(repo_name, rel_path, text, no_dedent, append)
   t.write_file(path, text, no_dedent, append)
 end
 
---- @return vim.SystemCompleted
-local function system_sync(cmd, opts)
-  return exec_lua(function()
-    local obj = vim.system(cmd, opts)
-
-    if opts and opts.timeout then
-      -- Minor delay before calling wait() so the timeout uv timer can have a headstart over the
-      -- internal call to vim.wait() in wait().
-      vim.wait(10)
-    end
-
-    local res = obj:wait()
-
-    -- Check the process is no longer running
-    assert(not vim.api.nvim_get_proc(obj.pid), 'process still exists')
-
-    return res
-  end)
-end
-
 local function git_cmd(cmd, repo_name)
   local git_cmd_prefix = {
     'git',
@@ -89,7 +69,7 @@ local function git_cmd(cmd, repo_name)
   cmd = vim.list_extend(git_cmd_prefix, cmd)
   local cwd = repo_get_path(repo_name)
   local sys_opts = { cwd = cwd, text = true, clear_env = true }
-  local out = system_sync(cmd, sys_opts)
+  local out = n.system_sync(cmd, sys_opts)
   if out.code ~= 0 then
     error(out.stderr)
   end
@@ -280,26 +260,18 @@ local function watch_events(event)
   end)
 end
 
---- @param log table[]
-local function make_find_packchanged(log)
-  --- @param suffix string
-  return function(suffix, kind, name, version, active, user_data)
-    local path = pack_get_plug_path(name)
-    local spec = { name = name, src = repos_src[name], version = version, data = user_data }
-    local data = { active = active, kind = kind, path = path, spec = spec }
-    local entry = { event = 'PackChanged' .. suffix, match = vim.fs.abspath(path), data = data }
-
-    local res = 0
-    for i, tbl in ipairs(log) do
-      if vim.deep_equal(tbl, entry) then
-        res = i
-        break
-      end
-    end
-    eq(true, res > 0)
-
-    return res
+--- Input is array of  { suffix, kind, name, version, active, user_data }
+--- @param log_compact ([string,string,string,string,boolean,any])[]
+local function assert_packchanged(log_compact)
+  local log = exec_lua('return _G.event_log')
+  local expected = {} --- @type table[]
+  for i, l in ipairs(log_compact) do
+    local path = pack_get_plug_path(l[3])
+    local spec = { name = l[3], src = repos_src[l[3]], version = l[4], data = l[6] }
+    local data = { active = l[5], kind = l[2], path = path, spec = spec }
+    expected[i] = { event = 'PackChanged' .. l[1], match = vim.fs.abspath(path), data = data }
   end
+  eq(expected, log)
 end
 
 local function track_nvim_echo()
@@ -314,9 +286,9 @@ local function track_nvim_echo()
   end)
 end
 
-local function assert_progress_report(action, step_names)
-  -- NOTE: Assume that `nvim_echo` mocked log has only progress report messages
-  local echo_log = exec_lua('return _G.echo_log') ---@type table[]
+--- @param echo_log table[]?
+local function assert_progress_report(echo_log, action, step_names)
+  echo_log = echo_log or exec_lua('return _G.echo_log')
   local n_steps = #step_names
   eq(n_steps + 2, #echo_log)
 
@@ -393,6 +365,10 @@ local function get_lock_path()
   return vim.fs.joinpath(fn.stdpath('config'), 'nvim-pack-lock.json')
 end
 
+local function get_other_lock_path()
+  return vim.fs.joinpath(fn.stdpath('state'), 'test-pack-lock')
+end
+
 --- @return {plugins:table<string, {rev:string, src:string, version?:string}>}
 local function get_lock_tbl()
   return vim.json.decode(fn.readblob(get_lock_path()))
@@ -415,6 +391,7 @@ describe('vim.pack', function()
   after_each(function()
     local pack_dir = pack_get_dir()
     local lock_path = get_lock_path()
+    local other_lock_path = get_other_lock_path()
     local log_path = vim.fs.joinpath(fn.stdpath('log'), 'nvim-pack.log')
 
     -- Wait for neovim to close before removing directories so it can release
@@ -424,6 +401,7 @@ describe('vim.pack', function()
 
     n.rmdir(pack_dir)
     pcall(vim.fs.rm, lock_path, { force = true })
+    pcall(vim.fs.rm, other_lock_path, { force = true })
     pcall(vim.fs.rm, log_path, { force = true })
   end)
 
@@ -442,7 +420,8 @@ describe('vim.pack', function()
 
       -- Should not create redundant stash entry
       local basic_path = pack_get_plug_path('basic')
-      local stash_list = system_sync({ 'git', 'stash', 'list' }, { cwd = basic_path }).stdout or ''
+      local stash_list = n.system_sync({ 'git', 'stash', 'list' }, { cwd = basic_path }).stdout
+        or ''
       eq('', stash_list)
     end)
 
@@ -653,16 +632,13 @@ describe('vim.pack', function()
       eq(true, pack_exists('defbranch'))
       eq(false, exec_lua('return pcall(require, "defbranch")'))
 
-      -- Should trigger `kind=install` events
-      local log = exec_lua('return _G.event_log')
-      local find_event = make_find_packchanged(log)
-      local installpre_basic = find_event('Pre', 'install', 'basic', 'main', false, { 'd' })
-      local installpre_defbranch = find_event('Pre', 'install', 'defbranch', nil, false)
-      local install_basic = find_event('', 'install', 'basic', 'main', false, { 'd' })
-      local install_defbranch = find_event('', 'install', 'defbranch', nil, false)
-      eq(4, #log)
-      eq(true, installpre_basic < install_basic)
-      eq(true, installpre_defbranch < install_defbranch)
+      -- Should trigger `kind=install` events in a pre-defined order
+      assert_packchanged({
+        { 'Pre', 'install', 'basic', 'main', false, { 'd' } },
+        { 'Pre', 'install', 'defbranch', nil, false },
+        { '', 'install', 'basic', 'main', false, { 'd' } },
+        { '', 'install', 'defbranch', nil, false },
+      })
 
       -- Running `update()` should still update to use `main`
       exec_lua(function()
@@ -786,6 +762,29 @@ describe('vim.pack', function()
       assert()
     end)
 
+    it("respects 'packlockfile'", function()
+      local other_lock_path = get_other_lock_path()
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+      exec_lua(function()
+        vim.pack.add({ repos_src.basic })
+      end)
+      local ref_lockfile = {
+        plugins = {
+          basic = { rev = git_get_hash('main', 'basic'), src = repos_src.basic },
+        },
+      }
+      eq(ref_lockfile, vim.json.decode(fn.readblob(other_lock_path)))
+      eq(false, vim.uv.fs_stat(get_lock_path()) ~= nil)
+
+      n.clear()
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+      exec_lua(function()
+        vim.pack.add({ { src = repos_src.basic, version = 'feat-branch' } })
+      end)
+      ref_lockfile.plugins.basic.version = "'feat-branch'"
+      eq(ref_lockfile, vim.json.decode(fn.readblob(other_lock_path)))
+    end)
+
     it('removes unrepairable corrupted data and plugins', function()
       vim_pack_add({ repos_src.basic, repos_src.defbranch, repos_src.semver, repos_src.helptags })
 
@@ -832,7 +831,7 @@ describe('vim.pack', function()
 
       eq('basic feat-branch', out)
 
-      local rtp = vim.tbl_map(t.fix_slashes, api.nvim_list_runtime_paths())
+      local rtp = api.nvim_list_runtime_paths()
       local plug_path = pack_get_plug_path('basic')
       local after_dir = vim.fs.joinpath(plug_path, 'after')
       eq(true, vim.tbl_contains(rtp, plug_path))
@@ -857,7 +856,7 @@ describe('vim.pack', function()
     end)
 
     it('can install from the Internet', function()
-      t.skip(skip_integ, 'NVIM_TEST_INTEG not set: skipping network integration test')
+      t.skip(skip_integ, 'NVIM_TEST_INTEG not set (network integration test)')
       vim_pack_add({ 'https://github.com/neovim/nvim-lspconfig' })
       eq(true, exec_lua('return pcall(require, "lspconfig")'))
     end)
@@ -920,26 +919,21 @@ describe('vim.pack', function()
     it('shows progress report during installation', function()
       track_nvim_echo()
       vim_pack_add({ repos_src.basic, repos_src.defbranch })
-      assert_progress_report('Installing plugins', { 'basic', 'defbranch' })
+      assert_progress_report(nil, 'Installing plugins', { 'basic', 'defbranch' })
     end)
 
     it('triggers relevant events', function()
       watch_events({ 'PackChangedPre', 'PackChanged' })
 
       -- Should provide event-data respecting manual `version` without inferring default
-      vim_pack_add({ { src = repos_src.basic, version = 'feat-branch' }, repos_src.defbranch })
-
-      local log = exec_lua('return _G.event_log')
-      local find_event = make_find_packchanged(log)
-      local installpre_basic = find_event('Pre', 'install', 'basic', 'feat-branch', false)
-      local installpre_defbranch = find_event('Pre', 'install', 'defbranch', nil, false)
-      local install_basic = find_event('', 'install', 'basic', 'feat-branch', false)
-      local install_defbranch = find_event('', 'install', 'defbranch', nil, false)
-      eq(4, #log)
-
-      -- NOTE: There is no guaranteed installation order among separate plugins (as it is async)
-      eq(true, installpre_basic < install_basic)
-      eq(true, installpre_defbranch < install_defbranch)
+      -- Should order events as they were supplied in `vim.pack.add`
+      vim_pack_add({ repos_src.defbranch, { src = repos_src.basic, version = 'feat-branch' } })
+      assert_packchanged({
+        { 'Pre', 'install', 'defbranch', nil, false },
+        { 'Pre', 'install', 'basic', 'feat-branch', false },
+        { '', 'install', 'defbranch', nil, false },
+        { '', 'install', 'basic', 'feat-branch', false },
+      })
     end)
 
     it('recognizes several `version` types', function()
@@ -976,7 +970,7 @@ describe('vim.pack', function()
         eq(ref, out)
 
         -- Should add necessary directories to runtimepath regardless of `opts.load`
-        local rtp = vim.tbl_map(t.fix_slashes, api.nvim_list_runtime_paths())
+        local rtp = api.nvim_list_runtime_paths()
         local plug_path = pack_get_plug_path('plugin % dirs')
         local after_dir = vim.fs.joinpath(plug_path, 'after')
         eq(true, vim.tbl_contains(rtp, plug_path))
@@ -1687,13 +1681,19 @@ describe('vim.pack', function()
         exec_lua('_G.echo_log = {}')
 
         ref_lockfile.plugins.fetch.rev = git_get_hash('main', 'fetch')
+        git_cmd({ 'checkout', 'main' }, 'fetch')
         repo_write_file('fetch', 'lua/fetch.lua', 'return "fetch new 3"')
         git_add_commit('Commit to be added 3', 'fetch')
 
         assert_action({ 3, 0 }, fetch_actions, 1)
 
         pack_assert_content('fetch', 'return "fetch new 2"')
-        assert_progress_report('Applying updates', { 'fetch' })
+
+        local echo_log = exec_lua('return _G.echo_log')
+        assert_progress_report(vim.list_slice(echo_log, 1, 3), 'Computing updates', { 'fetch' })
+        assert_progress_report(vim.list_slice(echo_log, 4, 6), 'Applying updates', { 'fetch' })
+        eq(6, #echo_log)
+
         line_match(1, '^# Update')
         eq(1, api.nvim_buf_line_count(0))
 
@@ -1901,7 +1901,7 @@ describe('vim.pack', function()
       local function assert_origin(ref)
         -- Should be in sync both on disk and in lockfile
         local opts = { cwd = pack_get_plug_path('basic') }
-        local real_origin = system_sync({ 'git', 'remote', 'get-url', 'origin' }, opts)
+        local real_origin = n.system_sync({ 'git', 'remote', 'get-url', 'origin' }, opts)
         eq(ref, vim.trim(real_origin.stdout))
 
         eq(ref, get_lock_tbl().plugins.basic.src)
@@ -1943,7 +1943,7 @@ describe('vim.pack', function()
       end)
 
       -- There should be no progress report about downloading updates
-      assert_progress_report('Computing updates', { 'defbranch' })
+      assert_progress_report(nil, 'Computing updates', { 'defbranch' })
 
       n.exec('write')
       pack_assert_content('defbranch', 'return "defbranch main"')
@@ -1956,22 +1956,28 @@ describe('vim.pack', function()
       exec_lua('vim.pack.update()')
 
       -- During initial download
-      assert_progress_report('Downloading updates', { 'fetch', 'defbranch', 'semver' })
+      assert_progress_report(nil, 'Downloading updates', { 'fetch', 'defbranch', 'semver' })
       exec_lua('_G.echo_log = {}')
 
       -- During application (only for plugins that have updates)
       n.exec('write')
-      assert_progress_report('Applying updates', { 'fetch' })
+      assert_progress_report(nil, 'Applying updates', { 'fetch' })
 
       -- During force update
       n.clear()
       track_nvim_echo()
+      git_cmd({ 'checkout', 'main' }, 'fetch')
       repo_write_file('fetch', 'lua/fetch.lua', 'return "fetch new 3"')
       git_add_commit('Commit to be added 3', 'fetch')
 
       vim_pack_add({ repos_src.fetch, repos_src.defbranch })
       exec_lua('vim.pack.update(nil, { force = true })')
-      assert_progress_report('Updating', { 'fetch', 'defbranch', 'semver' })
+
+      local echo_log = exec_lua('return _G.echo_log')
+      local all_plugs = { 'fetch', 'defbranch', 'semver' }
+      assert_progress_report(vim.list_slice(echo_log, 1, 5), 'Downloading updates', all_plugs)
+      assert_progress_report(vim.list_slice(echo_log, 6, 8), 'Applying updates', { 'fetch' })
+      eq(8, #echo_log)
     end)
 
     it('triggers relevant events', function()
@@ -1983,11 +1989,10 @@ describe('vim.pack', function()
 
       -- Should trigger relevant events only for actually updated plugins
       n.exec('write')
-      local log = exec_lua('return _G.event_log')
-      local find_event = make_find_packchanged(log)
-      eq(1, find_event('Pre', 'update', 'fetch', nil, true))
-      eq(2, find_event('', 'update', 'fetch', nil, true))
-      eq(2, #log)
+      assert_packchanged({
+        { 'Pre', 'update', 'fetch', nil, true },
+        { '', 'update', 'fetch', nil, true },
+      })
     end)
 
     it('stashes before applying changes', function()
@@ -1999,7 +2004,8 @@ describe('vim.pack', function()
       n.exec('write')
 
       local fetch_path = pack_get_plug_path('fetch')
-      local stash_list = system_sync({ 'git', 'stash', 'list' }, { cwd = fetch_path }).stdout or ''
+      local stash_list = n.system_sync({ 'git', 'stash', 'list' }, { cwd = fetch_path }).stdout
+        or ''
       matches('vim%.pack: %d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d Stash before checkout', stash_list)
 
       -- Update should still be applied
@@ -2042,6 +2048,37 @@ describe('vim.pack', function()
       --   after lockfile is deleted.
       eq(nil, lock_plugins.fetch.version)
       pack_assert_content('fetch', 'return "fetch dev"')
+    end)
+
+    it("respects 'packlockfile'", function()
+      n.rmdir(pack_get_dir())
+      pcall(vim.fs.rm, get_lock_path(), { force = true })
+
+      n.clear()
+      local other_lock_path = get_other_lock_path()
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+
+      exec_lua(function()
+        vim.pack.add({ repos_src.basic })
+      end)
+
+      eq(true, vim.uv.fs_stat(other_lock_path) ~= nil)
+      eq(false, vim.uv.fs_stat(get_lock_path()) ~= nil)
+
+      n.clear()
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+
+      exec_lua(function()
+        vim.pack.add({ { src = repos_src.basic, version = 'feat-branch' } })
+        vim.pack.update({ 'basic' }, { force = true })
+      end)
+      pack_assert_content('basic', 'return "basic feat-branch"')
+      local basic_lock = {
+        rev = git_get_hash('feat-branch', 'basic'),
+        src = repos_src.basic,
+        version = "'feat-branch'",
+      }
+      eq({ plugins = { basic = basic_lock } }, vim.json.decode(fn.readblob(other_lock_path)))
     end)
 
     it('validates input', function()
@@ -2292,6 +2329,23 @@ describe('vim.pack', function()
       eq(2, exec_lua('return #vim.pack.get()'))
       eq(2, vim.tbl_count(get_lock_tbl().plugins))
     end)
+
+    it("respects 'packlockfile'", function()
+      n.rmdir(pack_get_dir())
+      pcall(vim.fs.rm, get_lock_path(), { force = true })
+
+      n.clear()
+      local other_lock_path = get_other_lock_path()
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+
+      exec_lua(function()
+        vim.pack.add({ { src = repos_src.basic, version = 'feat-branch' } })
+      end)
+
+      local basic_data = make_basic_data(true, true)
+      eq({ basic_data }, exec_lua('return vim.pack.get()'))
+      eq(false, vim.uv.fs_stat(get_lock_path()) ~= nil)
+    end)
   end)
 
   describe('del()', function()
@@ -2332,21 +2386,23 @@ describe('vim.pack', function()
       local msg = 'vim.pack: Removed plugins: basic, plugindirs'
       eq(msg, n.exec_capture('messages'))
 
+      -- Should trigger relevant events in order as specified in `vim.pack.add()`
+      assert_packchanged({
+        { 'Pre', 'delete', 'basic', 'feat-branch', false },
+        { 'Pre', 'delete', 'defbranch', nil, true },
+        { 'Pre', 'delete', 'plugindirs', nil, false },
+        { '', 'delete', 'basic', 'feat-branch', false },
+        { '', 'delete', 'plugindirs', nil, false },
+      })
+      exec_lua('_G.event_log = {}')
+
       -- `:packdel` should output E5810 instead of the normal error
       eq(
         'Vim(packdel):E5810: Some plugins are active and were not deleted: defbranch',
         pcall_err(n.command, 'packdel defbranch')
       )
       assert_on_disk({ defbranch = true })
-
-      -- Should trigger relevant events in order as specified in `vim.pack.add()`
-      local log = exec_lua('return _G.event_log')
-      local find_event = make_find_packchanged(log)
-      eq(1, find_event('Pre', 'delete', 'basic', 'feat-branch', false))
-      eq(2, find_event('', 'delete', 'basic', 'feat-branch', false))
-      eq(3, find_event('Pre', 'delete', 'plugindirs', nil, false))
-      eq(4, find_event('', 'delete', 'plugindirs', nil, false))
-      eq(4, #log)
+      assert_packchanged({ { 'Pre', 'delete', 'defbranch', nil, true } })
 
       -- Should be possible to force delete active plugins
       n.exec('messages clear')
@@ -2355,15 +2411,13 @@ describe('vim.pack', function()
         vim.pack.del({ 'defbranch' }, { force = true })
       end)
 
-      assert_on_disk({ basic = false, defbranch = false, plugindirs = false })
-
       eq('vim.pack: Removed plugin: defbranch', n.exec_capture('messages'))
 
-      log = exec_lua('return _G.event_log')
-      find_event = make_find_packchanged(log)
-      eq(1, find_event('Pre', 'delete', 'defbranch', nil, true))
-      eq(2, find_event('', 'delete', 'defbranch', nil, false))
-      eq(2, #log)
+      assert_on_disk({ basic = false, defbranch = false, plugindirs = false })
+      assert_packchanged({
+        { 'Pre', 'delete', 'defbranch', nil, true },
+        { '', 'delete', 'defbranch', nil, false },
+      })
     end)
 
     it('works without prior `add()`', function()
@@ -2399,6 +2453,24 @@ describe('vim.pack', function()
       exec_lua('vim.pack.del({ "basic" })')
       eq(1, exec_lua('return #vim.pack.get()'))
       eq({ 'plugindirs' }, vim.tbl_keys(get_lock_tbl().plugins))
+    end)
+
+    it("respects 'packlockfile'", function()
+      n.rmdir(pack_get_dir())
+      pcall(vim.fs.rm, get_lock_path(), { force = true })
+
+      n.clear()
+      local other_lock_path = vim.fs.joinpath(fn.stdpath('data'), 'test-pack-lock')
+      api.nvim_set_option_value('packlockfile', other_lock_path, { scope = 'global' })
+
+      exec_lua(function()
+        vim.pack.add({ repos_src.basic })
+      end)
+
+      exec_lua('vim.pack.del({ "basic" }, { force = true })')
+      eq({ plugins = {} }, vim.json.decode(fn.readblob(other_lock_path)))
+      eq(false, pack_exists('basic'))
+      eq(false, vim.uv.fs_stat(get_lock_path()) ~= nil)
     end)
 
     it('validates input', function()

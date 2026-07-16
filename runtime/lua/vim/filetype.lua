@@ -1181,6 +1181,16 @@ local extension = {
   ss = 'scheme',
   scm = 'scheme',
   sld = 'scheme',
+  stwm = 'scheme',
+  stl = 'scheme',
+  stxt = 'scheme',
+  sprite = 'scheme',
+  strf = 'scheme',
+  satc = 'scheme',
+  stcd = 'scheme',
+  stf = 'scheme',
+  stcp = 'scheme',
+  music = 'scheme',
   stsg = 'scheme',
   sce = 'scilab',
   sci = 'scilab',
@@ -1269,6 +1279,7 @@ local extension = {
   srt = 'srt',
   ssa = 'ssa',
   ass = 'ssa',
+  allowed_signers = 'sshallowedsigners',
   st = 'st',
   ipd = 'starlark',
   sky = 'starlark',
@@ -1971,8 +1982,9 @@ local filename = {
   Snakefile = 'snakemake',
   ['.sqlite_history'] = 'sql',
   ['squid.conf'] = 'squid',
-  ['ssh_config'] = 'sshconfig',
-  ['sshd_config'] = 'sshdconfig',
+  allowed_signers = 'sshallowedsigners',
+  ssh_config = 'sshconfig',
+  sshd_config = 'sshdconfig',
   ['/etc/sudoers'] = 'sudoers',
   ['sudoers.tmp'] = 'sudoers',
   ['/etc/sysctl.conf'] = 'sysctl',
@@ -2171,9 +2183,11 @@ local pattern = {
     ['/etc/slp%.conf$'] = 'slpconf',
     ['/etc/slp%.reg$'] = 'slpreg',
     ['/etc/slp%.spi$'] = 'slpspi',
-    ['/etc/sudoers%.d/'] = starsetf('sudoers'),
     ['/etc/ssh/ssh_config%.d/.*%.conf$'] = 'sshconfig',
     ['/etc/ssh/sshd_config%.d/.*%.conf$'] = 'sshdconfig',
+    ['^/etc/ssh/ssh_known_hosts$'] = 'sshknownhosts',
+    ['^/etc/ssh/.+%.pub$'] = 'sshpublickey',
+    ['/etc/sudoers%.d/'] = starsetf('sudoers'),
     ['/etc/sudoers$'] = 'sudoers',
     ['/etc/sysctl%.conf$'] = 'sysctl',
     ['/etc/sysctl%.d/.*%.conf$'] = 'sysctl',
@@ -2533,6 +2547,9 @@ local pattern = {
     ['/%.pinforc$'] = 'pinfo',
     ['^${HOME}/%.xinitrc$'] = 'sh',
     ['^${HOME}/%.xserverrc$'] = 'sh',
+    ['/%.ssh/authorized_keys$'] = 'sshauthorizedkeys',
+    ['/%.ssh/known_hosts$'] = 'sshknownhosts',
+    ['/%.ssh/.+%.pub$'] = 'sshpublickey',
     ['/%.cargo/credentials$'] = 'toml',
     ['/%.init/.*%.override$'] = 'upstart',
     ['/%.kube/kuberc$'] = 'yaml',
@@ -2825,6 +2842,7 @@ local pattern = {
     end),
     ['/queries/.*%.scm$'] = 'query', -- treesitter queries (Neovim only)
     [',v$'] = 'rcs',
+    ['/supertux2/.*/info$'] = 'scheme',
     ['^svn%-commit.*%.tmp$'] = 'svn',
     ['%.swift%.gyb$'] = 'swiftgyb',
     ['^vivado.*%.jou$'] = 'tcl',
@@ -3236,18 +3254,22 @@ function M.match(args)
   end
 
   if name then
+    if name:sub(-1) == '/' and not name:find('^%a[%w+.-]*://') then
+      return 'directory'
+    end
     name = normalize_path(name)
 
-    local path = vim.fs.abspath(name)
-    do -- First check for the simple case where the full path exists as a key
+    local ok_abspath, path = pcall(vim.fs.abspath, name)
+    if ok_abspath then -- First check for the simple case where the full path exists as a key
       local ft, on_detect = dispatch(filename[path], path, bufnr)
       if ft then
         return ft, on_detect
       end
+    else
+      path = name
     end
 
     local tail = vim.fs.basename(name)
-
     do -- Next check against just the file name
       local ft, on_detect = dispatch(filename[tail], path, bufnr)
       if ft then

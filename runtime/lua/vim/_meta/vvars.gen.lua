@@ -129,7 +129,7 @@ vim.v.dying = ...
 
 --- Number of screen cells that can be used for an `:echo` message
 --- in the last screen line before causing the `hit-enter` prompt
---- (or "overflow" with `ui2`).
+--- (no longer applicable when `ui2` is enabled).
 ---
 --- Depends on 'showcmd', 'ruler' and 'columns'.  You need to
 --- check 'cmdheight' for whether there are full-width lines
@@ -666,6 +666,15 @@ vim.v.shell_error = ...
 --- `throw-variables`.
 --- @type table[]
 vim.v.stacktrace = ...
+
+--- The reason Nvim started. Possible values:
+--- - "normal"    Normal startup, yearning for life, etc.
+--- - "restart"   Started by `:restart`.
+--- - "restart!"  Started by `:restart!` or `ZR`.
+---
+--- Read-only.
+--- @type string
+vim.v.startreason = ...
 
 --- Timestamp (nanoseconds since UNIX epoch) when the Nvim process
 --- started.

@@ -407,7 +407,9 @@ void *vim_findfile_init(char *path, char *filename, size_t filenamelen, char *st
         ff_expand_buffer.data[ff_expand_buffer.size++] = *wc_part++;
         ff_expand_buffer.data[ff_expand_buffer.size++] = *wc_part++;
 
-        llevel = strtol(wc_part, &errpt, 10);
+        errpt = wc_part;
+        // Use def=255 so that overflow/too-large values keep the "max expand" behavior.
+        llevel = getdigits(&errpt, false, 255);
         if (errpt != wc_part && llevel > 0 && llevel < 255) {
           ff_expand_buffer.data[ff_expand_buffer.size++] = (char)llevel;
         } else if (errpt != wc_part && llevel == 0) {
@@ -1855,13 +1857,6 @@ void do_autocmd_dirchanged(char *new_dir, CdScope scope, CdCause cause, bool pre
     // Should never happen.
     abort();
   }
-
-#ifdef BACKSLASH_IN_FILENAME
-  char new_dir_buf[MAXPATHL];
-  STRCPY(new_dir_buf, new_dir);
-  slash_adjust(new_dir_buf);
-  new_dir = new_dir_buf;
-#endif
 
   if (pre) {
     tv_dict_add_str(dict, S_LEN("directory"), new_dir);

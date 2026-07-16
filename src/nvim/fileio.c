@@ -23,10 +23,11 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/buffer_updates.h"
 #include "nvim/change.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
+#include "nvim/dialog.h"
 #include "nvim/diff.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/vars.h"
@@ -36,11 +37,12 @@
 #include "nvim/fold.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/iconv_defs.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/log.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mbyte.h"
@@ -82,6 +84,10 @@
 #ifdef HAVE_DIRFD_AND_FLOCK
 # include <dirent.h>
 # include <sys/file.h>
+#endif
+
+#ifdef MSWIN
+# include "nvim/os/os_win_console.h"
 #endif
 
 #ifdef OPEN_CHR_FILES
@@ -311,6 +317,12 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
         // consider this to work like ":edit", thus reset the
         // BF_NOTEDITED flag.  Then ":write" will work to overwrite the
         // same file.
+        if (retval == OK && !curbuf->b_au_did_filetype && *curbuf->b_p_ft != NUL) {
+          apply_autocmds(EVENT_FILETYPE, curbuf->b_p_ft, curbuf->b_fname, true, curbuf);
+          if (aborting()) {
+            retval = FAIL;
+          }
+        }
         if (retval == OK) {
           curbuf->b_flags &= ~BF_NOTEDITED;
         }
@@ -1696,11 +1708,8 @@ failed:
       // On Unix, use stderr for stdin, makes shell commands work.
       vim_ignored = dup(2);
 #else
-      // On Windows, use the console input handle for stdin.
-      HANDLE conin = CreateFile("CONIN$", GENERIC_READ | GENERIC_WRITE,
-                                FILE_SHARE_READ, (LPSECURITY_ATTRIBUTES)NULL,
-                                OPEN_EXISTING, 0, (HANDLE)NULL);
-      vim_ignored = _open_osfhandle((intptr_t)conin, _O_RDONLY);
+      // On Windows, use the console input handle (CONIN$) for stdin.
+      vim_ignored = os_open_conin_fd();
 #endif
     }
   }
@@ -3139,11 +3148,11 @@ void buf_reload(buf_T *buf, int orig_mode, bool reload_options)
   buf_T *savebuf;
   bufref_T bufref;
   int saved = OK;
-  aco_save_T aco = { 0 };
+  CtxSwitch aco = { 0 };
   int flags = READ_NEW;
 
   // Set curwin/curbuf for "buf" and save some things.
-  aucmd_prepbuf(&aco, buf);
+  ctx_switch(&aco, NULL, NULL, buf, 0);
 
   // Unless reload_options is set, we only want to read the text from the
   // file, not reset the syntax highlighting, clear marks, diff status, etc.
@@ -3259,7 +3268,7 @@ void buf_reload(buf_T *buf, int orig_mode, bool reload_options)
   do_modelines(0);
 
   // restore curwin/curbuf and a few other things
-  aucmd_restbuf(&aco);
+  ctx_restore(&aco);
   // Careful: autocommands may have made "buf" invalid!
 }
 
@@ -3280,22 +3289,6 @@ void write_lnum_adjust(linenr_T offset)
     curbuf->b_no_eol_lnum += offset;
   }
 }
-
-#ifdef BACKSLASH_IN_FILENAME
-/// Convert all backslashes in fname to forward slashes in-place,
-/// unless when it looks like a URL.
-void forward_slash(char *fname)
-{
-  if (path_with_url(fname)) {
-    return;
-  }
-  for (char *p = fname; *p != NUL; p++) {
-    if (*p == '\\') {
-      *p = '/';
-    }
-  }
-}
-#endif
 
 /// Path to Nvim's own temp dir. Ends in a slash.
 static char *vim_tempdir = NULL;
@@ -3568,7 +3561,14 @@ static bool vim_settempdir(char *tempdir)
     return false;
   }
 
-  vim_FullName(tempdir, buf, MAXPATHL, false);
+  vim_FullName(tempdir, buf, MAXPATHL,
+#ifdef MSWIN
+               true
+#else
+               false
+#endif
+               );
+
   size_t buflen = strlen(buf);
   if (!after_pathsep(buf, buf + buflen)) {
     strcpy(buf + buflen, PATHSEPSTR);  // NOLINT(runtime/printf)
